@@ -1,8 +1,8 @@
 import torch
 from torch.utils.data import random_split
 import numpy as np
-from NoisyData import Data
-from BatchComponentwiseBoostingModel import ComponentwiseBoostingModel
+from data.NoisyData import Data
+from models.BatchComponentwiseBoostingModel import ComponentwiseBoostingModel
 import matplotlib.pyplot as plt
 
 
