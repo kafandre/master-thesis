@@ -16,7 +16,7 @@ class ComponentwiseBoostingModel:
     def __init__(
         self, 
         n_estimators: int = 100,
-        learning_rate: float = 0.001,
+        learning_rate: float = 0.01,
         random_state: Optional[int] = None,
         loss: str = 'mse',  # 'mse' for mean square error, 'flooding' for flooding loss
         track_history: bool = True
@@ -116,18 +116,7 @@ class ComponentwiseBoostingModel:
                 if batch_mse < self.flood_level:
                     print(f"Flipping gradient! Batch MSE: {batch_mse:.6f}, Flood level: {self.flood_level:.6f}")
                     # Flip the entire batch gradient to push away from minimum
-                    grad = -grad
-
-                # # Calculate squared errors for each sample individually
-                # squared_errors = (y_pred - y) ** 2
-                
-                # # Standard MSE gradient for each sample
-                # grad = y_pred - y
-                
-                # # For each sample, if its error is below flood level, reverse its gradient
-                # # This will push easy samples away from their minimum and cause oscillation
-                # below_flood_mask = squared_errors < self.flood_level
-                # grad[below_flood_mask] = -grad[below_flood_mask]                
+                    grad = -grad              
                 
                 return grad.unsqueeze(1) if grad.dim() == 1 else grad
             return flooding_gradient

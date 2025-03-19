@@ -1,1 +1,10 @@
+# Add environment
 .venv/
+
+# Add PNG files
+*.png
+
+# Add Python cache directories
+__pycache__/
+*.py[cod]
+*.class
