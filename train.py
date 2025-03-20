@@ -4,19 +4,19 @@ import numpy as np
 from data.NoisyData import Data
 from models.BatchComponentwiseBoostingModel import ComponentwiseBoostingModel
 import matplotlib.pyplot as plt
-
+from config import config
 
 
 # Set random seed for reproducibility   200 data points and 423 is overfit
-SEED = 111
+SEED = config.SEED
 torch.manual_seed(SEED)
 np.random.seed(SEED)
 
 # Generate synthetic data
-dataset = Data(data_amount=200, seed=423)
+dataset = Data(data_amount=config.data_amount, seed=config.data_seed)
 
 # Split data into train and test sets
-train_size = int(0.8 * len(dataset))
+train_size = int(config.train_split * len(dataset))
 test_size = len(dataset) - train_size
 train_dataset, test_dataset = random_split(dataset, [train_size, test_size])
 
@@ -28,11 +28,11 @@ X_test = torch.stack([test_dataset[i][0] for i in range(len(test_dataset))])
 y_test = torch.tensor([test_dataset[i][1] for i in range(len(test_dataset))])
 
 # Training parameters
-n_estimators = 1000
-learning_rate = 0.1
-eval_freq = 1
-flood_level = 34
-batch_size = 80
+n_estimators = config.n_estimators
+learning_rate = config.learning_rate
+eval_freq = config.eval_freq
+flood_level = config.flood_level
+batch_size = config.batch_size
 
 # Create and train MSE model
 print("Training CWB model with MSE loss...")
@@ -110,7 +110,7 @@ ax1.grid(True)
 flooding_test_len = len(flooding_model.history['test_loss'])
 
 ax2.plot(iterations[:flooding_train_len], 
-            flooding_model.history['train_loss'], 
+            flooding_model.history['train_mse'], 
             label='Train Loss', 
             color='blue')
 ax2.plot(iterations[:flooding_test_len], 
