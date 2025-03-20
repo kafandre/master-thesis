@@ -19,13 +19,18 @@ class ComponentwiseBoostingModel:
         learning_rate: float = 0.01,
         random_state: Optional[int] = None,
         loss: str = 'mse',  # 'mse' for mean square error, 'flooding' for flooding loss
-        track_history: bool = True
+        track_history: bool = True,
+        batch_mode: str = "all"  # "first_only" or "all"
     ):
         self.n_estimators = n_estimators
         self.learning_rate = learning_rate
         self.random_state = random_state
         self.loss = loss
         self.track_history = track_history
+        self.batch_mode = batch_mode
+        
+        if self.batch_mode not in ["first_only", "all"]:
+            raise ValueError("batch_mode must be either 'first_only' or 'all'")
         
         # Will be set during fitting
         self.estimators_: List[Tuple[int, torch.nn.Linear]] = []
@@ -173,6 +178,32 @@ class ComponentwiseBoostingModel:
         
         return best_feature_idx, best_model
     
+    def _evaluate_base_learner_on_full_data(
+        self,
+        X: torch.Tensor,
+        y: torch.Tensor,
+        current_pred: torch.Tensor,
+        feature_idx: int,
+        model: torch.nn.Linear
+    ) -> float:
+        """
+        Evaluate a feature base learner on the full dataset.
+            
+        Returns:
+            Loss value when this model is applied to the full dataset
+        """
+        # Get feature contribution
+        X_feature = X[:, feature_idx:feature_idx+1]
+        feature_contrib = model(X_feature).squeeze() * self.learning_rate
+        
+        # Update predictions temporarily for evaluation
+        new_pred = current_pred + feature_contrib
+        
+        # Compute loss
+        loss = self.loss_fn(new_pred, y).item()
+        
+        return loss
+    
     def fit(
         self, 
         X: torch.Tensor, 
@@ -186,7 +217,7 @@ class ComponentwiseBoostingModel:
         patience: int = 100,
         eval_freq: int = 1,
         verbose: bool = False,
-        batch_size: int = 32,  # Added batch_size parameter
+        batch_size: int = 32,
         **loss_params
     ) -> 'ComponentwiseBoostingModel':
         """
@@ -266,8 +297,11 @@ class ComponentwiseBoostingModel:
         
         # Boosting iterations
         for iteration in range(self.n_estimators):
+            # Lists to store candidate models from each batch
+            batch_candidates = []
+
             # Process data in batches
-            for batch_X, batch_y, batch_indices in train_loader:
+            for batch_idx, (batch_X, batch_y, batch_indices) in enumerate(train_loader):                
                 # Get current predictions for this batch
                 batch_current_pred = all_current_pred[batch_indices]
 
@@ -277,32 +311,50 @@ class ComponentwiseBoostingModel:
                 # Find best feature and fit a base model on this batch
                 feature_idx, model = self._componentwise_fit(batch_X, negative_gradients, self.loss_fn)
                 
-                # Update feature importance count
-                feature_counts[feature_idx] += 1
+                # Store candidate model and feature
+                batch_candidates.append((feature_idx, model))
                 
-                # Store the estimator
-                self.estimators_.append((feature_idx, model))
+                # If using only the first batch, break after one iteration
+                if self.batch_mode == "first_only" and batch_idx == 0:
+                    break
+
+            # Select the best model among all candidates based on full training set performance
+            best_loss = float('inf')
+            best_feature_idx = -1
+            best_model = None   
+
+            for feature_idx, model in batch_candidates:
+                # Evaluate this model on the full training set
+                loss = self._evaluate_base_learner_on_full_data(X, y, all_current_pred, feature_idx, model)
                 
-                # Track selected feature
-                if self.track_history:
-                    self.history['selected_features'].append(feature_idx)
+                if loss < best_loss:
+                    best_loss = loss
+                    best_feature_idx = feature_idx
+                    best_model = model                         
                 
-                # Update predictions for ALL data points using this model
-                feature_contrib = model(X[:, feature_idx:feature_idx+1]) * self.learning_rate
-                all_current_pred += feature_contrib.squeeze()
+            # Update feature importance count
+            feature_counts[feature_idx] += 1
                 
-                # Update validation predictions if available
-                if X_val is not None and y_val is not None:
-                    val_feature_contrib = model(X_val[:, feature_idx:feature_idx+1]) * self.learning_rate
-                    val_pred += val_feature_contrib.squeeze()
-                
-                # Update test predictions if available
-                if X_test is not None and y_test is not None:
-                    test_feature_contrib = model(X_test[:, feature_idx:feature_idx+1]) * self.learning_rate
-                    test_pred += test_feature_contrib.squeeze()
-                
-                # Break after one batch per iteration to maintain boosting sequence
-                break
+            # Store the best estimator
+            self.estimators_.append((best_feature_idx, best_model))
+            
+            # Track selected feature
+            if self.track_history:
+                self.history['selected_features'].append(best_feature_idx)
+            
+            # Update predictions for ALL data points using the best model
+            feature_contrib = best_model(X[:, best_feature_idx:best_feature_idx+1]) * self.learning_rate
+            all_current_pred += feature_contrib.squeeze()
+            
+            # Update validation predictions if available
+            if X_val is not None and y_val is not None:
+                val_feature_contrib = best_model(X_val[:, best_feature_idx:best_feature_idx+1]) * self.learning_rate
+                val_pred += val_feature_contrib.squeeze()
+            
+            # Update test predictions if available
+            if X_test is not None and y_test is not None:
+                test_feature_contrib = best_model(X_test[:, best_feature_idx:best_feature_idx+1]) * self.learning_rate
+                test_pred += test_feature_contrib.squeeze()
             
             # Evaluate and track losses
             if self.track_history and (iteration + 1) % eval_freq == 0:
