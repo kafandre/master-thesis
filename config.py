@@ -11,7 +11,7 @@ class config:
     learning_rate = 0.1     # Learning rate for the CWB model
     eval_freq = 1           # Evaluation frequency (iterations)
     batch_size = train_size       # Batch size for training
-    batch_mode = "all"
+    batch_mode = "all"      # 'all' or 'first'
     
     # Flooding parameters
-    flood_level = 0        # Flooding level for the flooding loss
+    flood_level = 32        # Flooding level for the flooding loss

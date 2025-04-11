@@ -61,7 +61,8 @@ flooding_model = ComponentwiseBoostingModel(
     learning_rate=learning_rate,
     random_state=SEED,
     loss='flooding',
-    track_history=True
+    track_history=True,
+    batch_mode=config.batch_mode
 )
 
 flooding_model.fit(

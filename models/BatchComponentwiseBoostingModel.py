@@ -2,6 +2,7 @@ import torch
 from torch.utils.data import TensorDataset, DataLoader
 import numpy as np
 from typing import List, Tuple, Optional, Callable, Dict
+import random
 
 
 class ComponentwiseBoostingModel:
@@ -20,7 +21,7 @@ class ComponentwiseBoostingModel:
         random_state: Optional[int] = None,
         loss: str = 'mse',  # 'mse' for mean square error, 'flooding' for flooding loss
         track_history: bool = True,
-        batch_mode: str = "all"  # "first_only" or "all"
+        batch_mode: str = "all"  # "first" or "all"
     ):
         self.n_estimators = n_estimators
         self.learning_rate = learning_rate
@@ -29,8 +30,8 @@ class ComponentwiseBoostingModel:
         self.track_history = track_history
         self.batch_mode = batch_mode
         
-        if self.batch_mode not in ["first_only", "all"]:
-            raise ValueError("batch_mode must be either 'first_only' or 'all'")
+        if self.batch_mode not in ["first", "all"]:
+            raise ValueError("batch_mode must be either 'first' or 'all'")
         
         # Will be set during fitting
         self.estimators_: List[Tuple[int, torch.nn.Linear]] = []
@@ -116,12 +117,17 @@ class ComponentwiseBoostingModel:
                 
                 # Standard MSE gradient for the batch
                 grad = y_pred - y
+
+                # Calculate sign based on whether we're below or above flood level
+                sign = -1.0 if batch_mse < self.flood_level else 1.0
+                
+                # Apply sign to gradient (negative if below flood level, positive if above)
+                # This pushes away from minimum when below flood level
+                grad = sign * grad
                 
                 # Check if batch is below flood level
                 if batch_mse < self.flood_level:
-                    print(f"Flipping gradient! Batch MSE: {batch_mse:.6f}, Flood level: {self.flood_level:.6f}")
-                    # Flip the entire batch gradient to push away from minimum
-                    grad = -grad              
+                    print(f"Flipping gradient! Batch MSE: {batch_mse:.6f}, Flood level: {self.flood_level:.6f}")           
                 
                 return grad.unsqueeze(1) if grad.dim() == 1 else grad
             return flooding_gradient
@@ -315,7 +321,7 @@ class ComponentwiseBoostingModel:
                 batch_candidates.append((feature_idx, model))
                 
                 # If using only the first batch, break after one iteration
-                if self.batch_mode == "first_only" and batch_idx == 0:
+                if self.batch_mode == "first" and batch_idx == 0:
                     break
 
             # Select the best model among all candidates based on full training set performance
