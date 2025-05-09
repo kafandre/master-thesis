@@ -3,6 +3,7 @@ from torch.utils.data import TensorDataset, DataLoader
 import numpy as np
 from typing import List, Tuple, Optional, Callable, Dict
 import random
+import os
 
 
 class ComponentwiseBoostingModel:
@@ -344,6 +345,8 @@ class ComponentwiseBoostingModel:
         eval_freq: int = 1,
         verbose: bool = False,
         batch_size: int = 32,
+        save_iterations: Optional[List[int]] = None,  # New parameter for saving at specific iterations
+        save_path: str = "./model_checkpoints",       # Directory to save models    
         **loss_params
     ) -> 'ComponentwiseBoostingModel':
         """
@@ -367,6 +370,10 @@ class ComponentwiseBoostingModel:
         Returns:
             self
         """
+
+        # Create save directory if it doesn't exist
+        if save_iterations and len(save_iterations) > 0:
+            os.makedirs(save_path, exist_ok=True)
 
         # Set or update loss function
         loss_type = loss if loss is not None else self.loss
@@ -569,11 +576,112 @@ class ComponentwiseBoostingModel:
                     else:
                         print("")
 
+            # Check if we should save the model at this iteration
+            if save_iterations and (iteration + 1) in save_iterations:
+                checkpoint_path = os.path.join(save_path, f"model_iteration_{iteration+1}.pt")
+                self._save_model(checkpoint_path)
+                if verbose:
+                    print(f"\nSaved model checkpoint at iteration {iteration+1} to {checkpoint_path}\n")
+
+        # Save final model if the last iteration is in save_iterations
+        if save_iterations and self.n_estimators in save_iterations:
+            checkpoint_path = os.path.join(save_path, f"model_iteration_{self.n_estimators}.pt")
+            self._save_model(checkpoint_path)
+            if verbose:
+                print(f"\nSaved final model checkpoint at iteration {self.n_estimators} to {checkpoint_path}\n")
+
         # Calculate feature importances
         self.feature_importances_ = feature_counts / np.sum(feature_counts)
         
         return self
-    
+
+    def _save_model(self, path: str) -> None:
+        """
+        Save the model to a file.
+        
+        Args:
+            path: Path to save the model
+        """
+        # Create a dictionary with all the model state
+        model_state = {
+            'n_estimators': self.n_estimators,
+            'learning_rate': self.learning_rate,
+            'initial_learning_rate': self.initial_learning_rate,
+            'current_learning_rate': self.current_learning_rate,
+            'random_state': self.random_state,
+            'loss': self.loss,
+            'track_history': self.track_history,
+            'batch_mode': self.batch_mode,
+            'flood_offset': self.flood_offset,
+            'previous_train_mse': self.previous_train_mse,
+            'lr_ascent_mode': self.lr_ascent_mode,
+            'lr_ascent_factor': self.lr_ascent_factor,
+            'lr_ascent_step_size': self.lr_ascent_step_size,
+            'lr_max': self.lr_max,
+            'lr_ascent_activated': self.lr_ascent_activated,
+            'lr_ascent_start_iter': self.lr_ascent_start_iter,
+            'estimators_': self.estimators_,
+            'feature_importances_': self.feature_importances_,
+            'intercept_': self.intercept_,
+            'flood_level': self.flood_level,
+            'history': self.history
+        }
+        
+        # Save to file using torch.save
+        torch.save(model_state, path)
+
+    @classmethod
+    def load_model(cls, path: str) -> 'ComponentwiseBoostingModel':
+        """
+        Load a model from a file.
+        
+        Args:
+            path: Path to load the model from
+            
+        Returns:
+            ComponentwiseBoostingModel: Loaded model
+        """
+        # Load the state dictionary
+        model_state = torch.load(path)
+        
+        # Create a new instance with the basic parameters
+        model = cls(
+            n_estimators=model_state['n_estimators'],
+            learning_rate=model_state['initial_learning_rate'],
+            random_state=model_state['random_state'],
+            loss=model_state['loss'],
+            track_history=model_state['track_history'],
+            batch_mode=model_state['batch_mode'],
+            lr_ascent_mode=model_state['lr_ascent_mode'],
+            lr_ascent_factor=model_state['lr_ascent_factor'],
+            lr_ascent_step_size=model_state['lr_ascent_step_size'],
+            lr_max=model_state['lr_max'],
+            flood_offset=model_state['flood_offset']
+        )
+        
+        # Restore all the trained state
+        model.initial_learning_rate = model_state['initial_learning_rate']
+        model.current_learning_rate = model_state['current_learning_rate']
+        model.lr_ascent_activated = model_state['lr_ascent_activated']
+        model.lr_ascent_start_iter = model_state['lr_ascent_start_iter']
+        model.estimators_ = model_state['estimators_']
+        model.feature_importances_ = model_state['feature_importances_']
+        model.intercept_ = model_state['intercept_']
+        model.flood_level = model_state['flood_level']
+        model.history = model_state['history']
+        model.previous_train_mse = model_state['previous_train_mse']
+        
+        # Reinitialize loss functions since they can't be serialized
+        if model_state['loss'] == 'mse':
+            model.loss_fn = model._get_loss_fn('mse')
+        elif model_state['loss'] == 'flooding':
+            model.loss_fn = model._get_loss_fn('flooding', flood_level=model.flood_level)
+        
+        # Always set the evaluation loss function to MSE
+        model.eval_loss_fn = model._get_eval_loss_fn()
+        
+        return model
+
     def predict(self, X: torch.Tensor) -> torch.Tensor:
         """
         Generate predictions for the input data.
