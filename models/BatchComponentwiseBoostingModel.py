@@ -21,18 +21,38 @@ class ComponentwiseBoostingModel:
         random_state: Optional[int] = None,
         loss: str = 'mse',  # 'mse' for mean square error, 'flooding' for flooding loss
         track_history: bool = True,
-        batch_mode: str = "all"  # "first" or "all"
+        batch_mode: str = "all",  # "first" or "all"
+        lr_ascent_mode: str = "exponential",  # "linear", "exponential", or "step"
+        lr_ascent_factor: float = 0.1,  # Factor for learning rate increase
+        lr_ascent_step_size: int = 10,  # For step mode: increase after this many iterations
+        lr_max: float = 0.3,  # Maximum allowed learning rate
+        flood_offset: float = 0.5  # Fixed offset above train MSE        
     ):
         self.n_estimators = n_estimators
         self.learning_rate = learning_rate
+        self.initial_learning_rate = learning_rate  # Store initial learning rate
+        self.current_learning_rate = learning_rate  # Track current learning rate        
         self.random_state = random_state
         self.loss = loss
         self.track_history = track_history
         self.batch_mode = batch_mode
+        self.flood_offset = flood_offset
+        self.previous_train_mse = None        
+
+        # Learning rate ascent parameters
+        self.lr_ascent_mode = lr_ascent_mode
+        self.lr_ascent_factor = lr_ascent_factor
+        self.lr_ascent_step_size = lr_ascent_step_size
+        self.lr_max = lr_max
+        self.lr_ascent_activated = False
+        self.lr_ascent_start_iter = None        
         
         if self.batch_mode not in ["first", "all"]:
             raise ValueError("batch_mode must be either 'first' or 'all'")
-        
+
+        if self.lr_ascent_mode not in ["linear", "exponential", "step"]:
+            raise ValueError("lr_ascent_mode must be one of: 'linear', 'exponential', or 'step'")
+             
         # Will be set during fitting
         self.estimators_: List[Tuple[int, torch.nn.Linear]] = []
         self.feature_importances_ = None
@@ -47,7 +67,8 @@ class ComponentwiseBoostingModel:
             'train_mse': [],           # Using MSE for evaluation
             'val_loss': [],            # Using MSE for evaluation
             'test_loss': [],           # Using MSE for evaluation
-            'selected_features': []
+            'selected_features': [],
+            'learning_rate': []        # Track learning rate changes            
         }
         
         if random_state is not None:
@@ -59,13 +80,19 @@ class ComponentwiseBoostingModel:
         self.intercept_ = torch.mean(y).item()
         self.estimators_ = []
         
+        # Reset learning rate ascent tracking
+        self.current_learning_rate = self.initial_learning_rate
+        self.lr_ascent_activated = False
+        self.lr_ascent_start_iter = None
+
         # Reset history
         self.history = {
             'train_loss': [],          # Using training loss (e.g., flooding)
             'train_mse': [],           # Using MSE for evaluation
             'val_loss': [],            # Using MSE for evaluation
             'test_loss': [],           # Using MSE for evaluation
-            'selected_features': []
+            'selected_features': [],
+            'learning_rate': []        # Track learning rate changes            
         }
 
     def _get_loss_fn(self, loss_type: str, **kwargs) -> Callable:
@@ -82,7 +109,7 @@ class ComponentwiseBoostingModel:
         if loss_type == 'mse':
             return lambda y_pred, y: torch.mean((y_pred - y) ** 2)
         elif loss_type == 'flooding':
-            self.flood_level = kwargs.get('flood_level', 0.02)
+            self.flood_level = kwargs.get('flood_level', 0.01)
             return lambda y_pred, y: (abs(torch.mean((y_pred - y) ** 2) - self.flood_level) + self.flood_level)
         else:
             raise ValueError(f"Unsupported loss function: {loss_type}")
@@ -135,6 +162,49 @@ class ComponentwiseBoostingModel:
         else:
             raise ValueError(f"Unsupported loss function: {loss_type}")
 
+    def _update_learning_rate(self, iteration: int, current_loss: float) -> float:
+        """
+        Update Learning Rate based on provided parameters.
+        """
+        # If not using flooding loss, don't activate learning rate ascent
+        if self.loss != 'flooding' or self.flood_level is None:
+            return self.initial_learning_rate
+            
+        # Check if we should activate learning rate ascent
+        if not self.lr_ascent_activated and current_loss < self.flood_level+0.1:
+            self.lr_ascent_activated = True
+            self.lr_ascent_start_iter = iteration
+            print(f"Learning rate ascent activated at iteration {iteration+1}! Loss: {current_loss:.6f}, Flood level: {self.flood_level:.6f}")
+        
+        # If ascent is not activated yet, return initial learning rate
+        if not self.lr_ascent_activated:
+            return self.initial_learning_rate
+            
+        # Calculate iterations since ascent activation
+        iter_since_start = iteration - self.lr_ascent_start_iter
+        
+        # Calculate new learning rate based on ascent mode
+        if self.lr_ascent_mode == "linear":
+            # Linear increase: lr = initial_lr * (1 + factor * iter_since_start)
+            new_lr = self.initial_learning_rate * (1 + self.lr_ascent_factor * iter_since_start)
+            
+        elif self.lr_ascent_mode == "exponential":
+            # Exponential increase: lr = initial_lr * (1 + factor) ^ iter_since_start
+            new_lr = self.initial_learning_rate * ((1 + self.lr_ascent_factor) ** iter_since_start)
+            
+        elif self.lr_ascent_mode == "step":
+            # Step increase: lr = initial_lr * (1 + factor * floor(iter_since_start / step_size))
+            steps = iter_since_start // self.lr_ascent_step_size
+            new_lr = self.initial_learning_rate * (1 + self.lr_ascent_factor * steps)
+            
+        else:
+            # Default to no change
+            new_lr = self.initial_learning_rate
+            
+        # Ensure learning rate doesn't exceed maximum
+        new_lr = min(new_lr, self.lr_max)
+        
+        return new_lr
 
     def _componentwise_fit(
         self, 
@@ -200,8 +270,8 @@ class ComponentwiseBoostingModel:
         """
         # Get feature contribution
         X_feature = X[:, feature_idx:feature_idx+1]
-        feature_contrib = model(X_feature).squeeze() * self.learning_rate
-        
+        feature_contrib = model(X_feature).squeeze() * self.current_learning_rate     
+
         # Update predictions temporarily for evaluation
         new_pred = current_pred + feature_contrib
         
@@ -209,7 +279,57 @@ class ComponentwiseBoostingModel:
         loss = self.loss_fn(new_pred, y).item()
         
         return loss
-    
+
+    def _calculate_dynamic_flood_level(self, iteration: int, current_train_mse: float = None) -> float:        
+        """
+        Calculate dynamic flood level based on the current iteration.
+        
+        This is a simple function that you can modify directly in the code.
+        """
+        # # Base flood level
+        # base_level = 31.0
+        # # start_level = 31.0
+        # # increase_rate = 0.01
+        # # return start_level + increase_rate * iteration    
+        # # MODIFY THIS FORMULA TO CHANGE THE FLOOD LEVEL BEHAVIOR
+        # # Example: Simple sine wave oscillation
+        # amplitude = 3.0  # How much the flood level varies
+        # period = 500     # Complete cycle every 100 iterations
+        
+        # # Simple sine wave oscillation
+        # import math
+        # if iteration < 100:
+        #     return 31.0
+        # elif iteration < 400:
+        #     return 34.0
+        # elif iteration < 600:
+        #     return 36.0
+        # elif iteration < 800:
+        #     return 38.0
+        # else:
+        #     return 42.0
+
+        # For the very first iteration when we don't have an MSE yet
+        if iteration < 200 or (self.previous_train_mse is None and current_train_mse is None):
+            # Start with a default value
+            return 31.0
+        elif iteration < 400:
+            # Use provided current MSE if available, otherwise use the previously saved one
+            base_level = current_train_mse if current_train_mse is not None else self.previous_train_mse
+            
+            # Add the offset to create the flood level
+            return min(base_level + self.flood_offset, 40.0)
+        elif iteration < 410:
+            # Use provided current MSE if available, otherwise use the previously saved one
+            base_level = current_train_mse if current_train_mse is not None else self.previous_train_mse
+            
+            # Add the offset to create the flood level
+            return max(base_level - self.flood_offset, 31.0) 
+        else:
+            base_level = current_train_mse if current_train_mse is not None else self.previous_train_mse
+            return max(base_level - 0.12, 31.0)       
+
+
     def fit(
         self, 
         X: torch.Tensor, 
@@ -250,7 +370,7 @@ class ComponentwiseBoostingModel:
 
         # Set or update loss function
         loss_type = loss if loss is not None else self.loss
-        # Set training loss function based on specified loss type
+        # Set training loss function based on specified loss typeg
         self.loss_fn = self._get_loss_fn(loss_type, **loss_params)
         # Set evaluation loss function always to MSE
         self.eval_loss_fn = self._get_eval_loss_fn()
@@ -281,6 +401,12 @@ class ComponentwiseBoostingModel:
         train_dataset = TensorDataset(X, y, torch.arange(len(y)))  # Include indices
         train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 
+        # Calculate initial loss before training
+        initial_train_loss = self.loss_fn(all_current_pred, y).item()
+
+        # Initial learning rate
+        self.current_learning_rate = self.initial_learning_rate
+
         # Initial loss calculation before training
         if self.track_history:
             # Training loss using the specified loss function (e.g., flooding)
@@ -291,6 +417,9 @@ class ComponentwiseBoostingModel:
             train_mse = self.eval_loss_fn(all_current_pred, y).item()
             self.history['train_mse'].append(train_mse)
             
+            # Track learning rate
+            self.history['learning_rate'].append(self.current_learning_rate)
+
             if X_val is not None and y_val is not None:
                 # Validation loss always uses MSE
                 val_loss = self.eval_loss_fn(val_pred, y_val).item()
@@ -300,9 +429,30 @@ class ComponentwiseBoostingModel:
                 # Test loss always uses MSE
                 test_loss = self.eval_loss_fn(test_pred, y_test).item()
                 self.history['test_loss'].append(test_loss)
-        
+
+        # Initialize history tracking for flood level if using flooding loss
+        if self.track_history and loss_type == 'flooding':
+            self.history["flood_level"] = []
+            
+        # Set initial MSE to None - we'll calculate it in the first iteration
+        self.previous_train_mse = None               
+
         # Boosting iterations
         for iteration in range(self.n_estimators):
+            # Update flood level if using flooding loss
+            if loss_type == 'flooding':
+                # Calculate current MSE (not flooding loss)
+                current_train_mse = self.eval_loss_fn(all_current_pred, y).item()
+                
+                # Update flood level using current MSE
+                self.flood_level = self._calculate_dynamic_flood_level(iteration, current_train_mse)
+                
+                # Save current MSE for next iteration
+                self.previous_train_mse = current_train_mse
+                
+                if self.track_history:
+                    self.history["flood_level"].append(self.flood_level)
+
             # Lists to store candidate models from each batch
             batch_candidates = []
 
@@ -347,19 +497,28 @@ class ComponentwiseBoostingModel:
             # Track selected feature
             if self.track_history:
                 self.history['selected_features'].append(best_feature_idx)
-            
+
+            # Update the learning rate based on current loss
+            train_loss = self.loss_fn(all_current_pred, y).item()
+            self.current_learning_rate = self._update_learning_rate(iteration, train_loss)
+
+            if self.track_history:
+                # Ensure we have a learning rate entry for each iteration
+                if len(self.history['learning_rate']) <= iteration:
+                    self.history['learning_rate'].append(self.current_learning_rate)
+
             # Update predictions for ALL data points using the best model
-            feature_contrib = best_model(X[:, best_feature_idx:best_feature_idx+1]) * self.learning_rate
+            feature_contrib = best_model(X[:, best_feature_idx:best_feature_idx+1]) * self.current_learning_rate
             all_current_pred += feature_contrib.squeeze()
-            
+
             # Update validation predictions if available
             if X_val is not None and y_val is not None:
-                val_feature_contrib = best_model(X_val[:, best_feature_idx:best_feature_idx+1]) * self.learning_rate
+                val_feature_contrib = best_model(X_val[:, best_feature_idx:best_feature_idx+1]) * self.current_learning_rate
                 val_pred += val_feature_contrib.squeeze()
-            
+
             # Update test predictions if available
             if X_test is not None and y_test is not None:
-                test_feature_contrib = best_model(X_test[:, best_feature_idx:best_feature_idx+1]) * self.learning_rate
+                test_feature_contrib = best_model(X_test[:, best_feature_idx:best_feature_idx+1]) * self.current_learning_rate
                 test_pred += test_feature_contrib.squeeze()
             
             # Evaluate and track losses
@@ -371,7 +530,7 @@ class ComponentwiseBoostingModel:
                 # Training MSE for evaluation purposes
                 train_mse = self.eval_loss_fn(all_current_pred, y).item()
                 self.history['train_mse'].append(train_mse)
-                
+                             
                 if X_val is not None and y_val is not None:
                     # Validation loss always uses MSE
                     val_loss = self.eval_loss_fn(val_pred, y_val).item()
@@ -395,6 +554,8 @@ class ComponentwiseBoostingModel:
                     test_loss = self.eval_loss_fn(test_pred, y_test).item()
                     self.history['test_loss'].append(test_loss)
                 
+                # verbose output
+                # In verbose output, add flood level info
                 if verbose and (iteration + 1) % (eval_freq * 10) == 0:
                     print(f"Iteration {iteration+1}/{self.n_estimators}, ", end="")
                     print(f"Train Loss: {train_loss:.6f} (Train MSE: {train_mse:.6f})", end="")
@@ -402,8 +563,12 @@ class ComponentwiseBoostingModel:
                         print(f", Val MSE: {val_loss:.6f}", end="")
                     if X_test is not None and y_test is not None:
                         print(f", Test MSE: {test_loss:.6f}", end="")
-                    print()
-        
+                    print(f", LR: {self.current_learning_rate:.6f}", end="")
+                    if loss_type == 'flooding':
+                        print(f", Flood: {self.flood_level:.6f}")
+                    else:
+                        print("")
+
         # Calculate feature importances
         self.feature_importances_ = feature_counts / np.sum(feature_counts)
         
@@ -423,10 +588,17 @@ class ComponentwiseBoostingModel:
         predictions = torch.full((X.shape[0],), self.intercept_, device=X.device)
         
         # Add contribution from each estimator
-        for feature_idx, model in self.estimators_:
+        for i, (feature_idx, model) in enumerate(self.estimators_):
             X_feature = X[:, feature_idx:feature_idx+1]
-            predictions += model(X_feature).squeeze() * self.learning_rate
-            
+
+            # Use stored learning rate history if available, otherwise use final learning rate
+            if self.track_history and i < len(self.history['learning_rate']):
+                lr = self.history['learning_rate'][i]
+            else:
+                lr = self.current_learning_rate
+                
+            predictions += model(X_feature).squeeze() * lr
+
         return predictions
     
     def get_loss(self, X: torch.Tensor, y: torch.Tensor, use_training_loss: bool = False) -> float:
@@ -477,7 +649,14 @@ class ComponentwiseBoostingModel:
         for i in range(max_iterations):
             feature_idx, model = self.estimators_[i]
             X_feature = X[:, feature_idx:feature_idx+1]
-            predictions += model(X_feature).squeeze() * self.learning_rate
+            
+            # Use stored learning rate history if available, otherwise use final learning rate
+            if self.track_history and i < len(self.history['learning_rate']):
+                lr = self.history['learning_rate'][i]
+            else:
+                lr = self.current_learning_rate
+                
+            predictions += model(X_feature).squeeze() * lr
             
         return predictions
     
