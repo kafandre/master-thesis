@@ -73,7 +73,9 @@ flooding_model.fit(
     batch_size=batch_size,
     flood_level=flood_level,
     eval_freq=eval_freq,
-    verbose=True
+    verbose=True,
+    save_iterations=[29, 1000],
+    save_path="./flooding_model_checkpoints"    
 )
 
 
