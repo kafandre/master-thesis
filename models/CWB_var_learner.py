@@ -33,8 +33,9 @@ class ComponentwiseBoostingModel:
         lr_ascent_mode: str = "step",  # "linear", "exponential", or "step"
         lr_ascent_factor: float = 1.0,  # Factor for learning rate increase
         lr_ascent_step_size: int = 50,  # For step mode: increase after this many iterations
-        lr_max: float = 1.0,  # Maximum allowed learning rate
+        lr_max: float = 0.5,  # Maximum allowed learning rate
         top_k_selection: int = 10 # Number of top features to randomly select from
+
     ):
         self.n_estimators = n_estimators
         self.learning_rate = learning_rate
@@ -303,7 +304,8 @@ class ComponentwiseBoostingModel:
         self, 
         X: torch.Tensor, 
         negative_gradients: torch.Tensor,
-        loss_fn: Callable
+        loss_fn: Callable,
+        iteration: int
     ) -> Tuple[int, object]:
         """
         Fit a separate model for each feature and select the best one.
@@ -360,7 +362,14 @@ class ComponentwiseBoostingModel:
         # Select feature based on whether stochastic selection is activated
         if self.stochastic_selection_activated:
             # Random selection from top-k features
-            k = min(self.top_k_selection, n_features)
+            # k = min(self.top_k_selection, n_features)
+
+            iterations_since_activation = iteration - self.lr_ascent_start_iter
+            if iterations_since_activation < 50:  # First 50 iterations after activation
+                k = 3  # Conservative adaptation
+            else:
+                k = 10  # Aggressive exploration
+
             top_k_indices = torch.topk(losses_tensor, k, largest=False).indices
             selected_idx = top_k_indices[torch.randint(0, k, (1,))].item()
             print(f"Stochastic top-{k} selection: chose feature {selected_idx} from {top_k_indices.tolist()}")
@@ -508,7 +517,7 @@ class ComponentwiseBoostingModel:
                 negative_gradients = -gradient_fn(batch_current_pred, batch_y)
                 
                 # Find best feature and fit a base model on this batch
-                feature_idx, model = self._componentwise_fit(batch_X, negative_gradients, self.loss_fn)
+                feature_idx, model = self._componentwise_fit(batch_X, negative_gradients, self.loss_fn, iteration)
                 
                 # Store candidate model and feature
                 batch_candidates.append((feature_idx, model))
