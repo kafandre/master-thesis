@@ -2,7 +2,7 @@ import torch
 from torch.utils.data import random_split
 import numpy as np
 from data.NoisyData import Data
-from models.BatchComponentwiseBoostingModel import ComponentwiseBoostingModel
+from models.CWB_var_learner import ComponentwiseBoostingModel
 import matplotlib.pyplot as plt
 from config import config
 
@@ -40,10 +40,11 @@ mse_model = ComponentwiseBoostingModel(
     n_estimators=n_estimators,
     learning_rate=learning_rate,
     random_state=SEED,
+    base_learner="polynomial",
+    poly_degree=2,
     loss='mse',
-    track_history=True,
-    use_stochastic_selection=False
-)
+    track_history=True
+    )
 
 mse_model.fit(
     X=X_train, 
@@ -63,16 +64,11 @@ flooding_model = ComponentwiseBoostingModel(
     n_estimators=n_estimators,
     learning_rate=learning_rate,
     random_state=SEED,
+    base_learner="polynomial",
+    poly_degree=2,    
     loss='flooding',
     track_history=True,
-    batch_mode=config.batch_mode,
-    # Enable stochastic feature selection for flooding
-    use_stochastic_selection=True,
-    initial_temperature=0.001,       # Start nearly deterministic
-    final_temperature=20.0,          # End more random
-    warmup_epochs=200,               # Deterministic for first 50 epochs
-    momentum_strength=0.99,  
-    gradient_noise_scale=0.2
+    batch_mode=config.batch_mode
 )
 
 flooding_model.fit(
