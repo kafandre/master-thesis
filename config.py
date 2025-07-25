@@ -1,8 +1,8 @@
 class config:
     # Data generation parameters
-    data_amount = 200       # Number of data points to generate
-    SEED = 111              # Global random seed for reproducibility
-    data_seed = 423         # Seed specifically for data generation
+    data_amount = 500       # Number of data points to generate
+    SEED = 112              # Global random seed for reproducibility
+    data_seed = 425         # Seed specifically for data generation
     train_split = 0.8       # Proportion of data to use for training
     train_size = int(data_amount * train_split)
 
@@ -10,8 +10,8 @@ class config:
     n_estimators = 1000     # Number of estimators for the CWB model
     learning_rate = 0.1     # Learning rate for the CWB model
     eval_freq = 1           # Evaluation frequency (iterations)
-    batch_size = train_size       # Batch size for training
+    batch_size = train_size # Batch size for training
     batch_mode = "all"      # 'all' or 'first'
     
     # Flooding parameters
-    flood_level = 32        # Flooding level for the flooding loss
+    flood_level = 166        # Flooding level for the flooding loss

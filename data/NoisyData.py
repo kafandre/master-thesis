@@ -14,12 +14,12 @@ class Data(Dataset):
         
         # Generate features - fewer samples, more features
         # Core predictive features (similar to original)
-        self.x[:, 0] = torch.randn(data_amount) * 1 + -1
-        self.x[:, 1] = torch.randn(data_amount) * 3 + 5
+        self.x[:, 0] = torch.randn(data_amount) * 1 + -1        # 1 + -1
+        self.x[:, 1] = torch.randn(data_amount) * 3 + 5         # 3 + 5
         self.x[:, 2] = torch.randn(data_amount) * 0.5 + 0
         
         # Highly noisy features that will cause overfitting
-        self.x[:, 3] = torch.randn(data_amount) * 10  # High variance
+        self.x[:, 3] = torch.randn(data_amount) * 10            # High variance
         self.x[:, 4] = torch.randn(data_amount) * 8 - 4
         
         # Correlated features (variations of the predictive ones)
@@ -47,11 +47,15 @@ class Data(Dataset):
                   torch.mul(self.x[:, 0] * self.x[:, 1], 0.3) +
                   # Add a non-linear transformation that the model might overfit to
                   torch.mul(torch.sin(self.x[:, 3]), 1.5) +
+                # Add spurious interactions:
+                torch.mul(self.x[:, 4] * self.x[:, 8], 0.3) +
+                torch.mul(torch.cos(self.x[:, 12]), 0.5) +
+                torch.mul(self.x[:, 6] ** 2, 0.1) +                  
                   # Add small effects from noise features to tempt overfitting
                   torch.mul(self.x[:, 10], 0.1) +
                   torch.mul(self.x[:, 15], 0.2) +
                   # Very high noise level relative to signal
-                  torch.randn(data_amount) * 5)
+                  torch.randn(data_amount) * 10)
         
         self.len = self.x.shape[0]  # Number of samples
         

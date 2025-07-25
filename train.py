@@ -41,7 +41,8 @@ mse_model = ComponentwiseBoostingModel(
     learning_rate=learning_rate,
     random_state=SEED,
     loss='mse',
-    track_history=True
+    track_history=True,
+    use_stochastic_selection=False
 )
 
 mse_model.fit(
@@ -51,7 +52,9 @@ mse_model.fit(
     y_test=y_test,
     batch_size=train_size,    
     eval_freq=eval_freq,
-    verbose=True
+    verbose=True,
+    save_iterations=[1000],
+    save_path="./checkpoints"      
 )
 
 # Create and train Flooding loss model
@@ -62,7 +65,14 @@ flooding_model = ComponentwiseBoostingModel(
     random_state=SEED,
     loss='flooding',
     track_history=True,
-    batch_mode=config.batch_mode
+    batch_mode=config.batch_mode,
+    # Enable stochastic feature selection for flooding
+    use_stochastic_selection=True,
+    initial_temperature=0.001,       # Start nearly deterministic
+    final_temperature=20.0,          # End more random
+    warmup_epochs=200,               # Deterministic for first 50 epochs
+    momentum_strength=0.99,  
+    gradient_noise_scale=0.2
 )
 
 flooding_model.fit(
@@ -74,8 +84,8 @@ flooding_model.fit(
     flood_level=flood_level,
     eval_freq=eval_freq,
     verbose=True,
-    save_iterations=[29, 1000],
-    save_path="./flooding_model_checkpoints"    
+    save_iterations=[1000],
+    save_path="./checkpoints"    
 )
 
 

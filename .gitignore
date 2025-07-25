@@ -8,3 +8,7 @@
 __pycache__/
 *.py[cod]
 *.class
+
+# all models
+checkpoints/
+flooding_model_checkpoints/
