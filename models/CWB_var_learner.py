@@ -33,7 +33,7 @@ class ComponentwiseBoostingModel:
         lr_ascent_mode: str = "step",  # "linear", "exponential", or "step"
         lr_ascent_factor: float = 1.0,  # Factor for learning rate increase
         lr_ascent_step_size: int = 50,  # For step mode: increase after this many iterations
-        lr_max: float = 0.5,  # Maximum allowed learning rate
+        lr_max: float = 0.3,  # Maximum allowed learning rate
         top_k_selection: int = 10 # Number of top features to randomly select from
 
     ):
@@ -59,6 +59,11 @@ class ComponentwiseBoostingModel:
 
         # Top-k feature selection parameter
         self.top_k_selection = top_k_selection
+
+        # Momentum parameters
+        self.momentum_decay = 0.9
+        self.momentum_strength = 0.1
+        self.feature_momentum = {}
         
         if self.batch_mode not in ["first", "all"]:
             raise ValueError("batch_mode must be either 'first' or 'all'")
@@ -101,6 +106,9 @@ class ComponentwiseBoostingModel:
         self.lr_ascent_activated = False
         self.lr_ascent_start_iter = None
         self.stochastic_selection_activated = False
+
+        # Reset momentum tracking
+        self.feature_momentum = {}
 
         # Reset history
         self.history = {
@@ -300,6 +308,32 @@ class ComponentwiseBoostingModel:
         else:
             raise ValueError(f"Unknown base learner: {self.base_learner}")
 
+    def _simulated_momentum_selection(self, losses_tensor, k):
+        """Apply momentum-based feature selection."""
+        n_features = len(losses_tensor)
+        
+        # Update momentum scores for all features
+        for i, loss in enumerate(losses_tensor):
+            if i not in self.feature_momentum:
+                self.feature_momentum[i] = 0.0
+            
+            # Decay old momentum
+            self.feature_momentum[i] *= self.momentum_decay
+            
+            # Add momentum based on how good this feature was (lower loss = higher momentum boost)
+            momentum_boost = self.momentum_strength * (1.0 / (1.0 + loss.item()))
+            self.feature_momentum[i] += momentum_boost
+        
+        # Bias losses by momentum (subtract momentum to make good features more likely)
+        momentum_bias = torch.tensor([self.feature_momentum.get(i, 0.0) for i in range(n_features)])
+        adjusted_losses = losses_tensor - momentum_bias
+        
+        # Select from top-k based on adjusted losses
+        top_k_indices = torch.topk(adjusted_losses, k, largest=False).indices
+        selected_idx = top_k_indices[torch.randint(0, k, (1,))].item()
+        
+        return selected_idx
+
     def _componentwise_fit(
         self, 
         X: torch.Tensor, 
@@ -358,25 +392,24 @@ class ComponentwiseBoostingModel:
 
         # Convert losses to tensor for easier manipulation
         losses_tensor = torch.tensor(losses)
-        
+
         # Select feature based on whether stochastic selection is activated
         if self.stochastic_selection_activated:
-            # Random selection from top-k features
-            # k = min(self.top_k_selection, n_features)
-
+            # Use momentum-based selection
             iterations_since_activation = iteration - self.lr_ascent_start_iter
             if iterations_since_activation < 50:  # First 50 iterations after activation
                 k = 3  # Conservative adaptation
+            elif iterations_since_activation < 150:
+                k = 5    
             else:
                 k = 10  # Aggressive exploration
-
-            top_k_indices = torch.topk(losses_tensor, k, largest=False).indices
-            selected_idx = top_k_indices[torch.randint(0, k, (1,))].item()
-            print(f"Stochastic top-{k} selection: chose feature {selected_idx} from {top_k_indices.tolist()}")
+            
+            selected_idx = self._simulated_momentum_selection(losses_tensor, k)
+            print(f"Momentum-based top-{k} selection: chose feature {selected_idx}")
         else:
             # Deterministic selection (original behavior)
             selected_idx = torch.argmin(losses_tensor).item()
-        
+
         return selected_idx, models[selected_idx]
         return best_feature_idx, best_model
     

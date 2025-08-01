@@ -71,9 +71,9 @@ flooding_model = ComponentwiseBoostingModel(
     batch_mode=config.batch_mode,
     # Learning rate ascent parameters (for flooding)
     lr_ascent_mode="step",
-    lr_ascent_factor=1.0,
+    lr_ascent_factor=0.5,
     lr_ascent_step_size=50,
-    lr_max=0.3,
+    lr_max=0.4,
     # Top-k feature selection parameters
     top_k_selection=3
 )
