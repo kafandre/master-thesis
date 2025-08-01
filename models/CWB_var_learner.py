@@ -17,6 +17,7 @@ class ComponentwiseBoostingModel:
 
     - Uses specified loss during training
     - Uses MSE for evaluation/testing
+    - Now includes Nesterov momentum acceleration
     """
     
     def __init__(
@@ -34,8 +35,10 @@ class ComponentwiseBoostingModel:
         lr_ascent_factor: float = 1.0,  # Factor for learning rate increase
         lr_ascent_step_size: int = 50,  # For step mode: increase after this many iterations
         lr_max: float = 0.5,  # Maximum allowed learning rate
-        top_k_selection: int = 10 # Number of top features to randomly select from
-
+        top_k_selection: int = 10, # Number of top features to randomly select from
+        # Nesterov momentum parameters
+        use_nesterov: bool = False,  # Whether to use Nesterov momentum
+        momentum_gamma: float = 0.1,  # Momentum parameter γ from the paper
     ):
         self.n_estimators = n_estimators
         self.learning_rate = learning_rate
@@ -60,6 +63,11 @@ class ComponentwiseBoostingModel:
         # Top-k feature selection parameter
         self.top_k_selection = top_k_selection
         
+        # Nesterov momentum parameters
+        self.use_nesterov = use_nesterov
+        self.momentum_gamma = momentum_gamma
+        self.nesterov_activated = False
+        
         if self.batch_mode not in ["first", "all"]:
             raise ValueError("batch_mode must be either 'first' or 'all'")
 
@@ -70,9 +78,11 @@ class ComponentwiseBoostingModel:
             raise ValueError("base_learner must be one of: 'linear', 'polynomial', or 'tree'")
              
         # Will be set during fitting
-        self.estimators_: List[Tuple[int, object]] = []
+        self.estimators_: List[Tuple[int, object]] = []  # Primary model estimators
+        self.momentum_estimators_: List[Tuple[int, object]] = []  # Momentum model estimators
         self.feature_importances_ = None
         self.intercept_ = None
+        self.momentum_intercept_ = None  # Momentum model intercept
         self.loss_fn = None
         self.eval_loss_fn = None  # Always MSE for evaluation
         self.flood_level = None
@@ -84,6 +94,7 @@ class ComponentwiseBoostingModel:
             'val_loss': [],            # Using MSE for evaluation
             'test_loss': [],           # Using MSE for evaluation
             'selected_features': [],
+            'momentum_selected_features': [],  # For Nesterov momentum
             'learning_rate': []        # Track learning rate changes            
         }
         
@@ -94,13 +105,16 @@ class ComponentwiseBoostingModel:
     def _init_estimators(self, y: torch.Tensor):
         """Initialize with the mean prediction."""
         self.intercept_ = torch.mean(y).item()
+        self.momentum_intercept_ = self.intercept_  # Initialize momentum model with same intercept
         self.estimators_ = []
+        self.momentum_estimators_ = []
         
         # Reset learning rate ascent tracking
         self.current_learning_rate = self.initial_learning_rate
         self.lr_ascent_activated = False
         self.lr_ascent_start_iter = None
         self.stochastic_selection_activated = False
+        self.nesterov_activated = False
 
         # Reset history
         self.history = {
@@ -109,6 +123,7 @@ class ComponentwiseBoostingModel:
             'val_loss': [],            # Using MSE for evaluation
             'test_loss': [],           # Using MSE for evaluation
             'selected_features': [],
+            'momentum_selected_features': [],  # For Nesterov momentum
             'learning_rate': []        # Track learning rate changes            
         }
 
@@ -192,6 +207,11 @@ class ComponentwiseBoostingModel:
             self.lr_ascent_activated = True
             self.lr_ascent_start_iter = iteration
             print(f"Learning rate ascent activated at iteration {iteration+1}! Loss: {current_loss:.6f}, Flood level: {self.flood_level:.6f}")
+            
+            # Activate Nesterov momentum if enabled
+            if self.use_nesterov and not self.nesterov_activated:
+                self.nesterov_activated = True
+                print(f"Nesterov momentum activated at iteration {iteration+1}!")
         
         # If ascent is not activated yet, return initial learning rate
         if not self.lr_ascent_activated:
@@ -303,7 +323,7 @@ class ComponentwiseBoostingModel:
     def _componentwise_fit(
         self, 
         X: torch.Tensor, 
-        negative_gradients: torch.Tensor,
+        target_residuals: torch.Tensor,
         loss_fn: Callable,
         iteration: int
     ) -> Tuple[int, object]:
@@ -312,23 +332,20 @@ class ComponentwiseBoostingModel:
         
         Args:
             X: Input features tensor
-            negative_gradients: Negative gradients to fit against
+            target_residuals: Residuals to fit against (could be pseudo residuals or error-corrected residuals)
             loss_fn: Loss function to evaluate models
+            iteration: Current iteration number
             
         Returns:
             Tuple of (best_feature_idx, best_model)
         """
         n_features = X.shape[1]
-        # best_loss = float('inf')
-        # best_feature_idx = -1
-        # best_model = None
-
         losses = []
         models = []
 
-        # Ensure negative_gradients is 2D for compatibility
-        if negative_gradients.dim() == 1:
-            negative_gradients = negative_gradients.unsqueeze(1)
+        # Ensure target_residuals is 2D for compatibility
+        if target_residuals.dim() == 1:
+            target_residuals = target_residuals.unsqueeze(1)
 
         # Try each feature separately
         for feature_idx in range(n_features):
@@ -342,17 +359,12 @@ class ComponentwiseBoostingModel:
             
             # Create and fit base learner
             model = self._create_base_learner(feature_idx)
-            model = self._fit_base_learner(model, X_feature, negative_gradients)
+            model = self._fit_base_learner(model, X_feature, target_residuals)
             
             # Compute predictions and loss
             preds = self._predict_base_learner(model, X_feature)
-            loss = loss_fn(preds.squeeze(), negative_gradients.squeeze()).item()
+            loss = loss_fn(preds.squeeze(), target_residuals.squeeze()).item()
             
-            # if loss < best_loss:
-            #     best_loss = loss
-            #     best_feature_idx = feature_idx
-            #     best_model = model
-
             losses.append(loss)
             models.append(model)
 
@@ -362,13 +374,11 @@ class ComponentwiseBoostingModel:
         # Select feature based on whether stochastic selection is activated
         if self.stochastic_selection_activated:
             # Random selection from top-k features
-            # k = min(self.top_k_selection, n_features)
-
             iterations_since_activation = iteration - self.lr_ascent_start_iter
             if iterations_since_activation < 50:  # First 50 iterations after activation
                 k = 3  # Conservative adaptation
             else:
-                k = 10  # Aggressive exploration
+                k = 3 
 
             top_k_indices = torch.topk(losses_tensor, k, largest=False).indices
             selected_idx = top_k_indices[torch.randint(0, k, (1,))].item()
@@ -378,7 +388,6 @@ class ComponentwiseBoostingModel:
             selected_idx = torch.argmin(losses_tensor).item()
         
         return selected_idx, models[selected_idx]
-        return best_feature_idx, best_model
     
     def _evaluate_base_learner_on_full_data(
         self,
@@ -410,6 +419,91 @@ class ComponentwiseBoostingModel:
         
         return loss
 
+    def _compute_combined_prediction(self, X: torch.Tensor, iteration: int) -> torch.Tensor:
+        """
+        Compute the combined prediction g^[m] = (1 - θ_m) * f^[m] + θ_m * h^[m]
+        where f is the primary model and h is the momentum model.
+        
+        Args:
+            X: Input features
+            iteration: Current iteration (1-based)
+            
+        Returns:
+            Combined predictions
+        """
+        if not self.nesterov_activated:
+            # If Nesterov is not activated, just return primary model predictions
+            return self._predict_primary_model(X, iteration)
+        
+        # Calculate θ_m = 2 / (m + 1) as in the paper
+        theta_m = 2.0 / (iteration + 1)
+        
+        # Get predictions from both models
+        f_pred = self._predict_primary_model(X, iteration - 1)  # f^[m-1]
+        h_pred = self._predict_momentum_model(X, iteration - 1)  # h^[m-1]
+        
+        # Compute combined prediction: g^[m] = (1 - θ_m) * f^[m-1] + θ_m * h^[m-1]
+        combined_pred = (1 - theta_m) * f_pred + theta_m * h_pred
+        
+        return combined_pred
+
+    def _predict_primary_model(self, X: torch.Tensor, max_iteration: Optional[int] = None) -> torch.Tensor:
+        """
+        Generate predictions using only the primary model up to max_iteration.
+        """
+        predictions = torch.full((X.shape[0],), self.intercept_, device=X.device)
+        
+        max_iter = len(self.estimators_) if max_iteration is None else min(max_iteration, len(self.estimators_))
+        
+        for i in range(max_iter):
+            feature_idx, model = self.estimators_[i]
+            if self.base_learner == "linear":
+                X_feature = X[:, feature_idx:feature_idx+1]
+            else:
+                X_feature = X[:, feature_idx:feature_idx+1]
+
+            # Use stored learning rate history if available
+            if self.track_history and i < len(self.history['learning_rate']):
+                lr = self.history['learning_rate'][i]
+            else:
+                lr = self.current_learning_rate
+                
+            # Fix the shape issue here too
+            primary_contrib = self._predict_base_learner(model, X_feature)
+            primary_contrib = primary_contrib.flatten()[:len(predictions)] * lr
+            predictions += primary_contrib
+
+        return predictions
+
+    def _predict_momentum_model(self, X: torch.Tensor, max_iteration: Optional[int] = None) -> torch.Tensor:
+        """
+        Generate predictions using only the momentum model up to max_iteration.
+        """
+        if not self.nesterov_activated or len(self.momentum_estimators_) == 0:
+            return torch.full((X.shape[0],), self.momentum_intercept_, device=X.device)
+        
+        predictions = torch.full((X.shape[0],), self.momentum_intercept_, device=X.device)
+        
+        max_iter = len(self.momentum_estimators_) if max_iteration is None else min(max_iteration, len(self.momentum_estimators_))
+        
+        for i in range(max_iter):
+            feature_idx, model = self.momentum_estimators_[i]
+            if self.base_learner == "linear":
+                X_feature = X[:, feature_idx:feature_idx+1]
+            else:
+                X_feature = X[:, feature_idx:feature_idx+1]
+
+            # Calculate momentum learning rate: η_m = γ * ν * θ_m^(-1)
+            theta_m = 2.0 / (i + 2)  # iteration is 0-based in the loop
+            eta_m = self.momentum_gamma * self.current_learning_rate / theta_m
+            
+            # Fix the shape issue here
+            momentum_contrib = self._predict_base_learner(model, X_feature)
+            momentum_contrib = momentum_contrib.flatten()[:len(predictions)] * eta_m
+            predictions += momentum_contrib
+
+        return predictions
+
     def fit(
         self, 
         X: torch.Tensor, 
@@ -429,7 +523,7 @@ class ComponentwiseBoostingModel:
         **loss_params
     ) -> 'ComponentwiseBoostingModel':
         """
-        Fit the boosting model with batch processing.
+        Fit the boosting model with batch processing and optional Nesterov momentum.
         """
 
         # Create save directory if it doesn't exist
@@ -447,12 +541,15 @@ class ComponentwiseBoostingModel:
         # Initialize model with mean prediction
         self._init_estimators(y)
         
-        # Current predictions for all data points
+        # Current predictions for all data points (primary model)
         all_current_pred = torch.full_like(y, self.intercept_)
+        # Momentum model predictions
+        all_momentum_pred = torch.full_like(y, self.momentum_intercept_)
         
         # For validation data
         if X_val is not None and y_val is not None:
             val_pred = torch.full_like(y_val, self.intercept_)
+            val_momentum_pred = torch.full_like(y_val, self.momentum_intercept_)
             best_val_loss = float('inf')
             best_iteration = 0
             no_improvement_count = 0
@@ -460,6 +557,7 @@ class ComponentwiseBoostingModel:
         # For test data
         if X_test is not None and y_test is not None:
             test_pred = torch.full_like(y_test, self.intercept_)
+            test_momentum_pred = torch.full_like(y_test, self.momentum_intercept_)
         
         # Feature importance tracking
         n_features = X.shape[1]
@@ -471,6 +569,9 @@ class ComponentwiseBoostingModel:
 
         # Initial learning rate
         self.current_learning_rate = self.initial_learning_rate
+
+        # For Nesterov momentum: store error-corrected pseudo residuals
+        previous_error_corrected_residuals = None
 
         # Initial loss calculation before training
         if self.track_history:
@@ -505,35 +606,82 @@ class ComponentwiseBoostingModel:
             if loss_type == 'flooding' and self.track_history:
                 self.history["flood_level"].append(self.flood_level)
 
+            # Compute combined prediction for gradient calculation when using Nesterov
+            if self.nesterov_activated:
+                # Use combined prediction g^[m] for gradient calculation
+                combined_pred = self._compute_combined_prediction(X, iteration + 1)
+                gradient_base_pred = combined_pred
+            else:
+                # Use primary model prediction
+                gradient_base_pred = all_current_pred
+
             # Lists to store candidate models from each batch
             batch_candidates = []
+            momentum_batch_candidates = []
 
             # Process data in batches
             for batch_idx, (batch_X, batch_y, batch_indices) in enumerate(train_loader):                
-                # Get current predictions for this batch
-                batch_current_pred = all_current_pred[batch_indices]
+                # Get current predictions for this batch (for gradient calculation)
+                batch_gradient_pred = gradient_base_pred[batch_indices]
 
-                # Compute negative gradients for this batch
-                negative_gradients = -gradient_fn(batch_current_pred, batch_y)
+                # Compute negative gradients for this batch (standard pseudo residuals)
+                negative_gradients = -gradient_fn(batch_gradient_pred, batch_y)
                 
-                # Find best feature and fit a base model on this batch
+                # Find best feature and fit a base model on this batch (primary model)
                 feature_idx, model = self._componentwise_fit(batch_X, negative_gradients, self.loss_fn, iteration)
                 
                 # Store candidate model and feature
                 batch_candidates.append((feature_idx, model))
                 
+                # If Nesterov is activated, fit momentum model
+                if self.nesterov_activated:
+                    # Compute error-corrected pseudo residuals
+                    if iteration == 0 or previous_error_corrected_residuals is None:
+                        # First iteration: c^[m] = r^[m]
+                        error_corrected_residuals = negative_gradients
+                    else:
+                        # c^[m] = r^[m] + (m/(m+1)) * (c^[m-1] - h^[m-1])
+                        prev_momentum_contrib = torch.zeros_like(batch_y)
+                        if len(self.momentum_estimators_) > 0:
+                            # Get contribution from previous momentum model
+                            prev_feature_idx, prev_momentum_model = self.momentum_estimators_[-1]
+                            if self.base_learner == "linear":
+                                prev_X_feature = batch_X[:, prev_feature_idx:prev_feature_idx+1]
+                            else:
+                                prev_X_feature = batch_X[:, prev_feature_idx:prev_feature_idx+1]
+                            
+                            # Calculate previous momentum learning rate
+                            prev_theta_m = 2.0 / iteration  # For previous iteration
+                            prev_eta_m = self.momentum_gamma * self.current_learning_rate / prev_theta_m
+                            prev_momentum_contrib = self._predict_base_learner(prev_momentum_model, prev_X_feature).squeeze() * prev_eta_m
+                        
+                        # Get previous error-corrected residuals for this batch
+                        prev_batch_residuals = previous_error_corrected_residuals[batch_indices] if previous_error_corrected_residuals is not None else torch.zeros_like(batch_y)
+                        
+                        # Compute error-corrected residuals
+                        momentum_factor = iteration / (iteration + 1)
+                        error_corrected_residuals = negative_gradients + momentum_factor * (prev_batch_residuals - prev_momentum_contrib)
+                        
+                        # Ensure error_corrected_residuals is properly shaped
+                        if error_corrected_residuals.dim() == 1:
+                            error_corrected_residuals = error_corrected_residuals.unsqueeze(1)
+                    
+                    # Fit momentum model to error-corrected residuals
+                    momentum_feature_idx, momentum_model = self._componentwise_fit(batch_X, error_corrected_residuals, self.loss_fn, iteration)
+                    momentum_batch_candidates.append((momentum_feature_idx, momentum_model))
+                
                 # If using only the first batch, break after one iteration
                 if self.batch_mode == "first" and batch_idx == 0:
                     break
 
-            # Select the best model among all candidates based on full training set performance
+            # Select the best primary model among all candidates based on full training set performance
             best_loss = float('inf')
             best_feature_idx = -1
             best_model = None   
 
             for feature_idx, model in batch_candidates:
                 # Evaluate this model on the full training set
-                loss = self._evaluate_base_learner_on_full_data(X, y, all_current_pred, feature_idx, model)
+                loss = self._evaluate_base_learner_on_full_data(X, y, gradient_base_pred, feature_idx, model)
                 
                 if loss < best_loss:
                     best_loss = loss
@@ -543,15 +691,47 @@ class ComponentwiseBoostingModel:
             # Update feature importance count
             feature_counts[best_feature_idx] += 1
                 
-            # Store the best estimator
+            # Store the best primary estimator
             self.estimators_.append((best_feature_idx, best_model))
             
             # Track selected feature
             if self.track_history:
                 self.history['selected_features'].append(best_feature_idx)
 
+            # Select and store best momentum model if Nesterov is activated
+            if self.nesterov_activated and momentum_batch_candidates:
+                best_momentum_loss = float('inf')
+                best_momentum_feature_idx = -1
+                best_momentum_model = None
+                
+                for momentum_feature_idx, momentum_model in momentum_batch_candidates:
+                    # For momentum model, we can use similar evaluation (simplified)
+                    if self.base_learner == "linear":
+                        X_feature = X[:, momentum_feature_idx:momentum_feature_idx+1]
+                    else:
+                        X_feature = X[:, momentum_feature_idx:momentum_feature_idx+1]
+                    
+                    # Calculate momentum learning rate
+                    theta_m = 2.0 / (iteration + 1)
+                    eta_m = self.momentum_gamma * self.current_learning_rate / theta_m
+                    
+                    momentum_contrib = self._predict_base_learner(momentum_model, X_feature).squeeze() * eta_m
+                    temp_momentum_pred = all_momentum_pred + momentum_contrib
+                    momentum_loss = self.loss_fn(temp_momentum_pred, y).item()
+                    
+                    if momentum_loss < best_momentum_loss:
+                        best_momentum_loss = momentum_loss
+                        best_momentum_feature_idx = momentum_feature_idx
+                        best_momentum_model = momentum_model
+                
+                # Store the best momentum estimator
+                self.momentum_estimators_.append((best_momentum_feature_idx, best_momentum_model))
+                
+                if self.track_history:
+                    self.history['momentum_selected_features'].append(best_momentum_feature_idx)
+
             # Update the learning rate based on current loss
-            train_loss = self.loss_fn(all_current_pred, y).item()
+            train_loss = self.loss_fn(gradient_base_pred, y).item()
             self.current_learning_rate = self._update_learning_rate(iteration, train_loss)
 
             # Activate stochastic selection when LR ascent activates
@@ -565,7 +745,7 @@ class ComponentwiseBoostingModel:
                 if len(self.history['learning_rate']) <= iteration:
                     self.history['learning_rate'].append(self.current_learning_rate)
 
-            # Update predictions for ALL data points using the best model
+            # Update predictions for ALL data points using the best primary model
             if self.base_learner == "linear":
                 X_feature = X[:, best_feature_idx:best_feature_idx+1]
             else:
@@ -573,6 +753,48 @@ class ComponentwiseBoostingModel:
                 
             feature_contrib = self._predict_base_learner(best_model, X_feature).squeeze() * self.current_learning_rate
             all_current_pred += feature_contrib
+
+            # Update momentum model predictions if Nesterov is activated
+            if self.nesterov_activated and len(self.momentum_estimators_) > 0:
+                momentum_feature_idx, momentum_model = self.momentum_estimators_[-1]
+                if self.base_learner == "linear":
+                    X_momentum_feature = X[:, momentum_feature_idx:momentum_feature_idx+1]
+                else:
+                    X_momentum_feature = X[:, momentum_feature_idx:momentum_feature_idx+1]
+                
+                # Calculate momentum learning rate
+                theta_m = 2.0 / (iteration + 1)
+                eta_m = self.momentum_gamma * self.current_learning_rate / theta_m
+                
+                momentum_contrib = self._predict_base_learner(momentum_model, X_momentum_feature)
+                # Force momentum_contrib to be 1D with same length as all_momentum_pred
+                momentum_contrib = momentum_contrib.flatten()[:len(all_momentum_pred)] * eta_m
+                all_momentum_pred += momentum_contrib
+
+            # Store error-corrected residuals for next iteration if using Nesterov
+            if self.nesterov_activated:
+                # Compute error-corrected residuals for the full dataset
+                combined_pred_full = self._compute_combined_prediction(X, iteration + 1)
+                current_negative_gradients = -gradient_fn(combined_pred_full, y)
+                
+                if iteration == 0 or previous_error_corrected_residuals is None:
+                    previous_error_corrected_residuals = current_negative_gradients.clone()
+                else:
+                    # Get previous momentum contribution
+                    prev_momentum_contrib = torch.zeros_like(y)
+                    if len(self.momentum_estimators_) > 1:  # We need at least one previous momentum estimator
+                        prev_momentum_feature_idx, prev_momentum_model = self.momentum_estimators_[-2]
+                        if self.base_learner == "linear":
+                            prev_X_feature = X[:, prev_momentum_feature_idx:prev_momentum_feature_idx+1]
+                        else:
+                            prev_X_feature = X[:, prev_momentum_feature_idx:prev_momentum_feature_idx+1]
+                        
+                        prev_theta_m = 2.0 / iteration
+                        prev_eta_m = self.momentum_gamma * self.current_learning_rate / prev_theta_m
+                        prev_momentum_contrib = self._predict_base_learner(prev_momentum_model, prev_X_feature).squeeze() * prev_eta_m
+                    
+                    momentum_factor = iteration / (iteration + 1)
+                    previous_error_corrected_residuals = current_negative_gradients + momentum_factor * (previous_error_corrected_residuals - prev_momentum_contrib)
 
             # Update validation predictions if available
             if X_val is not None and y_val is not None:
@@ -584,6 +806,21 @@ class ComponentwiseBoostingModel:
                 val_feature_contrib = self._predict_base_learner(best_model, val_X_feature).squeeze() * self.current_learning_rate
                 val_pred += val_feature_contrib
 
+                # Update validation momentum predictions if Nesterov is activated
+                if self.nesterov_activated and len(self.momentum_estimators_) > 0:
+                    momentum_feature_idx, momentum_model = self.momentum_estimators_[-1]
+                    if self.base_learner == "linear":
+                        val_momentum_X_feature = X_val[:, momentum_feature_idx:momentum_feature_idx+1]
+                    else:
+                        val_momentum_X_feature = X_val[:, momentum_feature_idx:momentum_feature_idx+1]
+                    
+                    theta_m = 2.0 / (iteration + 1)
+                    eta_m = self.momentum_gamma * self.current_learning_rate / theta_m
+                    # ensure the contribution matches validation set size
+                    val_momentum_contrib = self._predict_base_learner(momentum_model, val_momentum_X_feature)
+                    val_momentum_contrib = val_momentum_contrib.flatten()[:len(val_momentum_pred)] * eta_m
+                    val_momentum_pred += val_momentum_contrib
+
             # Update test predictions if available
             if X_test is not None and y_test is not None:
                 if self.base_learner == "linear":
@@ -593,20 +830,51 @@ class ComponentwiseBoostingModel:
                     
                 test_feature_contrib = self._predict_base_learner(best_model, test_X_feature).squeeze() * self.current_learning_rate
                 test_pred += test_feature_contrib
+
+                # Update test momentum predictions if Nesterov is activated
+                if self.nesterov_activated and len(self.momentum_estimators_) > 0:
+                    momentum_feature_idx, momentum_model = self.momentum_estimators_[-1]
+                    if self.base_learner == "linear":
+                        test_momentum_X_feature = X_test[:, momentum_feature_idx:momentum_feature_idx+1]
+                    else:
+                        test_momentum_X_feature = X_test[:, momentum_feature_idx:momentum_feature_idx+1]
+                    
+                    theta_m = 2.0 / (iteration + 1)
+                    eta_m = self.momentum_gamma * self.current_learning_rate / theta_m
+                    # ensure the contribution matches test set size
+                    test_momentum_contrib = self._predict_base_learner(momentum_model, test_momentum_X_feature)
+                    test_momentum_contrib = test_momentum_contrib.flatten()[:len(test_momentum_pred)] * eta_m
+                    test_momentum_pred += test_momentum_contrib
             
             # Evaluate and track losses
             if self.track_history and (iteration + 1) % eval_freq == 0:
+                # For evaluation, use the appropriate prediction based on whether Nesterov is activated
+                if self.nesterov_activated:
+                    eval_pred = self._compute_combined_prediction(X, iteration + 1)
+                    if X_val is not None and y_val is not None:
+                        theta_m = 2.0 / (iteration + 1)
+                        eval_val_pred = (1 - theta_m) * val_pred + theta_m * val_momentum_pred
+                    if X_test is not None and y_test is not None:
+                        theta_m = 2.0 / (iteration + 1)
+                        eval_test_pred = (1 - theta_m) * test_pred + theta_m * test_momentum_pred
+                else:
+                    eval_pred = all_current_pred
+                    if X_val is not None and y_val is not None:
+                        eval_val_pred = val_pred
+                    if X_test is not None and y_test is not None:
+                        eval_test_pred = test_pred
+                
                 # Training loss using specified loss function (e.g., flooding)
-                train_loss = self.loss_fn(all_current_pred, y).item()
+                train_loss = self.loss_fn(eval_pred, y).item()
                 self.history['train_loss'].append(train_loss)
                 
                 # Training MSE for evaluation purposes
-                train_mse = self.eval_loss_fn(all_current_pred, y).item()
+                train_mse = self.eval_loss_fn(eval_pred, y).item()
                 self.history['train_mse'].append(train_mse)
                              
                 if X_val is not None and y_val is not None:
                     # Validation loss always uses MSE
-                    val_loss = self.eval_loss_fn(val_pred, y_val).item()
+                    val_loss = self.eval_loss_fn(eval_val_pred, y_val).item()
                     self.history['val_loss'].append(val_loss)
                     
                     # Check for early stopping
@@ -624,7 +892,7 @@ class ComponentwiseBoostingModel:
                 
                 if X_test is not None and y_test is not None:
                     # Test loss always uses MSE
-                    test_loss = self.eval_loss_fn(test_pred, y_test).item()
+                    test_loss = self.eval_loss_fn(eval_test_pred, y_test).item()
                     self.history['test_loss'].append(test_loss)
                 
                 # verbose output
@@ -637,9 +905,10 @@ class ComponentwiseBoostingModel:
                         print(f", Test MSE: {test_loss:.6f}", end="")
                     print(f", LR: {self.current_learning_rate:.6f}", end="")
                     if loss_type == 'flooding':
-                        print(f", Flood: {self.flood_level:.6f}")
-                    else:
-                        print("")
+                        print(f", Flood: {self.flood_level:.6f}", end="")
+                    if self.nesterov_activated:
+                        print(f", Nesterov: ON", end="")
+                    print("")
 
             # Check if we should save the model at this iteration
             if save_iterations and (iteration + 1) in save_iterations:
@@ -679,9 +948,14 @@ class ComponentwiseBoostingModel:
             'lr_max': self.lr_max,
             'lr_ascent_activated': self.lr_ascent_activated,
             'lr_ascent_start_iter': self.lr_ascent_start_iter,
+            'use_nesterov': self.use_nesterov,
+            'momentum_gamma': self.momentum_gamma,
+            'nesterov_activated': self.nesterov_activated,
             'estimators_': self.estimators_,
+            'momentum_estimators_': self.momentum_estimators_,
             'feature_importances_': self.feature_importances_,
             'intercept_': self.intercept_,
+            'momentum_intercept_': self.momentum_intercept_,
             'flood_level': self.flood_level,
             'history': self.history
         }
@@ -699,25 +973,20 @@ class ComponentwiseBoostingModel:
         Returns:
             Predictions tensor of shape (n_samples,)
         """
-        # Start with the intercept
-        predictions = torch.full((X.shape[0],), self.intercept_, device=X.device)
-        
-        # Add contribution from each estimator
-        for i, (feature_idx, model) in enumerate(self.estimators_):
-            if self.base_learner == "linear":
-                X_feature = X[:, feature_idx:feature_idx+1]
-            else:
-                X_feature = X[:, feature_idx:feature_idx+1]
-
-            # Use stored learning rate history if available, otherwise use final learning rate
-            if self.track_history and i < len(self.history['learning_rate']):
-                lr = self.history['learning_rate'][i]
-            else:
-                lr = self.current_learning_rate
-                
-            predictions += self._predict_base_learner(model, X_feature).squeeze() * lr
-
-        return predictions
+        if self.nesterov_activated and len(self.momentum_estimators_) > 0:
+            # Use combined prediction when Nesterov was activated during training
+            final_iteration = len(self.estimators_)
+            theta_final = 2.0 / (final_iteration + 1)
+            
+            # Get predictions from both models
+            f_pred = self._predict_primary_model(X)
+            h_pred = self._predict_momentum_model(X)
+            
+            # Return combined prediction
+            return (1 - theta_final) * f_pred + theta_final * h_pred
+        else:
+            # Use only primary model
+            return self._predict_primary_model(X)
     
     def get_loss(self, X: torch.Tensor, y: torch.Tensor, use_training_loss: bool = False) -> float:
         """

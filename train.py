@@ -43,7 +43,8 @@ mse_model = ComponentwiseBoostingModel(
     base_learner="polynomial",
     poly_degree=2,
     loss='mse',
-    track_history=True
+    track_history=True,
+    use_nesterov=False
     )
 
 mse_model.fit(
@@ -68,7 +69,17 @@ flooding_model = ComponentwiseBoostingModel(
     poly_degree=2,    
     loss='flooding',
     track_history=True,
-    batch_mode=config.batch_mode
+    batch_mode=config.batch_mode,
+    # Nesterov momentum parameters (enabled)
+    use_nesterov=True,
+    momentum_gamma=0.1,  # Default from paper, can be tuned
+    # Learning rate ascent parameters (for flooding)
+    lr_ascent_mode="step",
+    lr_ascent_factor=1.0,
+    lr_ascent_step_size=50,
+    lr_max=0.1,
+    # Top-k feature selection parameters
+    top_k_selection=10
 )
 
 flooding_model.fit(
