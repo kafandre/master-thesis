@@ -68,7 +68,14 @@ flooding_model = ComponentwiseBoostingModel(
     poly_degree=2,    
     loss='flooding',
     track_history=True,
-    batch_mode=config.batch_mode
+    batch_mode=config.batch_mode,
+    # Learning rate ascent parameters (for flooding)
+    lr_ascent_mode="step",
+    lr_ascent_factor=1.0,
+    lr_ascent_step_size=50,
+    lr_max=0.3,
+    # Top-k feature selection parameters
+    top_k_selection=3
 )
 
 flooding_model.fit(

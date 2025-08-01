@@ -14,4 +14,4 @@ class config:
     batch_mode = "all"      # 'all' or 'first'
     
     # Flooding parameters
-    flood_level = 166        # Flooding level for the flooding loss
+    flood_level = 160        # Flooding level for the flooding loss
