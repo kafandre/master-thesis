@@ -198,10 +198,6 @@ class ComponentwiseBoostingModel:
             return LinearBaseLearner(degrees_of_freedom=self.degrees_of_freedom)
         elif learner_type == "polynomial":
             return PolynomialBaseLearner(degree=self.poly_degree, degrees_of_freedom=self.degrees_of_freedom)
-        elif learner_type == "tree":
-            return TreeBaseLearner(max_depth=self.tree_max_depth, random_state=self.random_state)
-        elif learner_type == "splines":
-            return SplineBaseLearner(n_knots=self.spline_knots, degrees_of_freedom=self.degrees_of_freedom)
         else:
             raise ValueError(f"Unknown base learner: {learner_type}")
 
