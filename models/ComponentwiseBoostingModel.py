@@ -1,5 +1,4 @@
 import torch
-from torch.utils.data import TensorDataset, DataLoader
 import numpy as np
 from typing import List, Tuple, Optional, Callable, Dict
 import random
@@ -26,7 +25,6 @@ class ComponentwiseBoostingModel:
         random_state: Optional[int] = None,
         loss: str = 'mse',  # 'mse' for mean square error, 'flooding' for flooding loss
         track_history: bool = True,
-        batch_mode: str = "all",  # "first" or "all"
         base_learner: str = "linear",  # "linear", "polynomial", "tree"
         poly_degree: int = 2,  # For polynomial base learner
         tree_max_depth: int = 3,  # For tree base learner
@@ -37,7 +35,6 @@ class ComponentwiseBoostingModel:
         top_k_selection: int = 10, # Number of top features to randomly select from
         top_k_early: int = 1,
         top_k_late: int = 1
-
     ):
         self.n_estimators = n_estimators
         self.learning_rate = learning_rate
@@ -46,7 +43,6 @@ class ComponentwiseBoostingModel:
         self.random_state = random_state
         self.loss = loss
         self.track_history = track_history
-        self.batch_mode = batch_mode
         self.base_learner = base_learner
         self.poly_degree = poly_degree
         self.tree_max_depth = tree_max_depth
@@ -63,9 +59,7 @@ class ComponentwiseBoostingModel:
         self.top_k_selection = top_k_selection
         self.top_k_early = top_k_early
         self.top_k_late = top_k_late
-        
-        if self.batch_mode not in ["first", "all"]:
-            raise ValueError("batch_mode must be either 'first' or 'all'")
+        self.stochastic_selection_activated = False
 
         if self.lr_ascent_mode not in ["linear", "exponential", "step"]:
             raise ValueError("lr_ascent_mode must be one of: 'linear', 'exponential', or 'step'")
@@ -160,22 +154,22 @@ class ComponentwiseBoostingModel:
         elif loss_type == 'flooding':
             # For flooding loss: gradient is (y_pred - y) * sign(MSE - flood_level)
             def flooding_gradient(y_pred, y):
-                # Calculate batch MSE
-                batch_mse = torch.mean((y_pred - y) ** 2)
+                # Calculate MSE
+                mse = torch.mean((y_pred - y) ** 2)
                 
-                # Standard MSE gradient for the batch
+                # Standard MSE gradient
                 grad = y_pred - y
 
                 # Calculate sign based on whether we're below or above flood level
-                sign = -1.0 if batch_mse < self.flood_level else 1.0
+                sign = -1.0 if mse < self.flood_level else 1.0
                 
                 # Apply sign to gradient (negative if below flood level, positive if above)
                 # This pushes away from minimum when below flood level
                 grad = sign * grad
                 
-                # Check if batch is below flood level
-                if batch_mse < self.flood_level:
-                    print(f"Flipping gradient! Batch MSE: {batch_mse:.6f}, Flood level: {self.flood_level:.6f}")           
+                # Check if below flood level
+                if mse < self.flood_level:
+                    print(f"Flipping gradient! MSE: {mse:.6f}, Flood level: {self.flood_level:.6f}")           
                 
                 return grad.unsqueeze(1) if grad.dim() == 1 else grad
             return flooding_gradient
@@ -308,7 +302,6 @@ class ComponentwiseBoostingModel:
         self, 
         X: torch.Tensor, 
         negative_gradients: torch.Tensor,
-        loss_fn: Callable,
         iteration: int
     ) -> Tuple[int, object]:
         """
@@ -317,16 +310,12 @@ class ComponentwiseBoostingModel:
         Args:
             X: Input features tensor
             negative_gradients: Negative gradients to fit against
-            loss_fn: Loss function to evaluate models
+            iteration: Current iteration number
             
         Returns:
             Tuple of (best_feature_idx, best_model)
         """
         n_features = X.shape[1]
-        # best_loss = float('inf')
-        # best_feature_idx = -1
-        # best_model = None
-
         losses = []
         models = []
 
@@ -350,13 +339,8 @@ class ComponentwiseBoostingModel:
             
             # Compute predictions and loss
             preds = self._predict_base_learner(model, X_feature)
-            loss = loss_fn(preds.squeeze(), negative_gradients.squeeze()).item()
+            loss = torch.mean((preds.squeeze() - negative_gradients.squeeze()) ** 2).item()
             
-            # if loss < best_loss:
-            #     best_loss = loss
-            #     best_feature_idx = feature_idx
-            #     best_model = model
-
             losses.append(loss)
             models.append(model)
 
@@ -366,8 +350,6 @@ class ComponentwiseBoostingModel:
         # Select feature based on whether stochastic selection is activated
         if self.stochastic_selection_activated:
             # Random selection from top-k features
-            # k = min(self.top_k_selection, n_features)
-
             iterations_since_activation = iteration - self.lr_ascent_start_iter
             if iterations_since_activation < 50:  # First 50 iterations after activation
                 k = self.top_k_early  # Conservative adaptation
@@ -382,37 +364,6 @@ class ComponentwiseBoostingModel:
             selected_idx = torch.argmin(losses_tensor).item()
         
         return selected_idx, models[selected_idx]
-        return best_feature_idx, best_model
-    
-    def _evaluate_base_learner_on_full_data(
-        self,
-        X: torch.Tensor,
-        y: torch.Tensor,
-        current_pred: torch.Tensor,
-        feature_idx: int,
-        model: object
-    ) -> float:
-        """
-        Evaluate a feature base learner on the full dataset.
-            
-        Returns:
-            Loss value when this model is applied to the full dataset
-        """
-        # Get feature contribution
-        if self.base_learner == "linear":
-            X_feature = X[:, feature_idx:feature_idx+1]
-        else:
-            X_feature = X[:, feature_idx:feature_idx+1]
-            
-        feature_contrib = self._predict_base_learner(model, X_feature).squeeze() * self.current_learning_rate     
-
-        # Update predictions temporarily for evaluation
-        new_pred = current_pred + feature_contrib
-        
-        # Compute loss
-        loss = self.loss_fn(new_pred, y).item()
-        
-        return loss
 
     def fit(
         self, 
@@ -427,13 +378,12 @@ class ComponentwiseBoostingModel:
         patience: int = 100,
         eval_freq: int = 1,
         verbose: bool = False,
-        batch_size: int = 32,
         save_iterations: Optional[List[int]] = None,
         save_path: str = "./checkpoints",
         **loss_params
     ) -> 'ComponentwiseBoostingModel':
         """
-        Fit the boosting model with batch processing.
+        Fit the boosting model using standard componentwise gradient boosting.
         """
 
         # Create save directory if it doesn't exist
@@ -452,7 +402,7 @@ class ComponentwiseBoostingModel:
         self._init_estimators(y)
         
         # Current predictions for all data points
-        all_current_pred = torch.full_like(y, self.intercept_)
+        current_pred = torch.full_like(y, self.intercept_)
         
         # For validation data
         if X_val is not None and y_val is not None:
@@ -469,21 +419,17 @@ class ComponentwiseBoostingModel:
         n_features = X.shape[1]
         feature_counts = np.zeros(n_features)
 
-        # Create data loaders for batch processing
-        train_dataset = TensorDataset(X, y, torch.arange(len(y)))  # Include indices
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-
         # Initial learning rate
         self.current_learning_rate = self.initial_learning_rate
 
         # Initial loss calculation before training
         if self.track_history:
             # Training loss using the specified loss function (e.g., flooding)
-            train_loss = self.loss_fn(all_current_pred, y).item()
+            train_loss = self.loss_fn(current_pred, y).item()
             self.history['train_loss'].append(train_loss)
             
             # Training MSE for evaluation purposes
-            train_mse = self.eval_loss_fn(all_current_pred, y).item()
+            train_mse = self.eval_loss_fn(current_pred, y).item()
             self.history['train_mse'].append(train_mse)
             
             # Track learning rate
@@ -509,53 +455,24 @@ class ComponentwiseBoostingModel:
             if loss_type == 'flooding' and self.track_history:
                 self.history["flood_level"].append(self.flood_level)
 
-            # Lists to store candidate models from each batch
-            batch_candidates = []
-
-            # Process data in batches
-            for batch_idx, (batch_X, batch_y, batch_indices) in enumerate(train_loader):                
-                # Get current predictions for this batch
-                batch_current_pred = all_current_pred[batch_indices]
-
-                # Compute negative gradients for this batch
-                negative_gradients = -gradient_fn(batch_current_pred, batch_y)
-                
-                # Find best feature and fit a base model on this batch
-                feature_idx, model = self._componentwise_fit(batch_X, negative_gradients, self.loss_fn, iteration)
-                
-                # Store candidate model and feature
-                batch_candidates.append((feature_idx, model))
-                
-                # If using only the first batch, break after one iteration
-                if self.batch_mode == "first" and batch_idx == 0:
-                    break
-
-            # Select the best model among all candidates based on full training set performance
-            best_loss = float('inf')
-            best_feature_idx = -1
-            best_model = None   
-
-            for feature_idx, model in batch_candidates:
-                # Evaluate this model on the full training set
-                loss = self._evaluate_base_learner_on_full_data(X, y, all_current_pred, feature_idx, model)
-                
-                if loss < best_loss:
-                    best_loss = loss
-                    best_feature_idx = feature_idx
-                    best_model = model                         
-                
+            # Compute negative gradients for the full dataset
+            negative_gradients = -gradient_fn(current_pred, y)
+            
+            # Find best feature and fit a base model
+            feature_idx, model = self._componentwise_fit(X, negative_gradients, iteration)
+            
             # Update feature importance count
-            feature_counts[best_feature_idx] += 1
+            feature_counts[feature_idx] += 1
                 
-            # Store the best estimator
-            self.estimators_.append((best_feature_idx, best_model))
+            # Store the estimator
+            self.estimators_.append((feature_idx, model))
             
             # Track selected feature
             if self.track_history:
-                self.history['selected_features'].append(best_feature_idx)
+                self.history['selected_features'].append(feature_idx)
 
             # Update the learning rate based on current loss
-            train_loss = self.loss_fn(all_current_pred, y).item()
+            train_loss = self.loss_fn(current_pred, y).item()
             self.current_learning_rate = self._update_learning_rate(iteration, train_loss)
 
             # Activate stochastic selection when LR ascent activates
@@ -569,43 +486,43 @@ class ComponentwiseBoostingModel:
                 if len(self.history['learning_rate']) <= iteration:
                     self.history['learning_rate'].append(self.current_learning_rate)
 
-            # Update predictions for ALL data points using the best model
+            # Update predictions for all data points using the selected model
             if self.base_learner == "linear":
-                X_feature = X[:, best_feature_idx:best_feature_idx+1]
+                X_feature = X[:, feature_idx:feature_idx+1]
             else:
-                X_feature = X[:, best_feature_idx:best_feature_idx+1]
+                X_feature = X[:, feature_idx:feature_idx+1]
                 
-            feature_contrib = self._predict_base_learner(best_model, X_feature).squeeze() * self.current_learning_rate
-            all_current_pred += feature_contrib
+            feature_contrib = self._predict_base_learner(model, X_feature).squeeze() * self.current_learning_rate
+            current_pred += feature_contrib
 
             # Update validation predictions if available
             if X_val is not None and y_val is not None:
                 if self.base_learner == "linear":
-                    val_X_feature = X_val[:, best_feature_idx:best_feature_idx+1]
+                    val_X_feature = X_val[:, feature_idx:feature_idx+1]
                 else:
-                    val_X_feature = X_val[:, best_feature_idx:best_feature_idx+1]
+                    val_X_feature = X_val[:, feature_idx:feature_idx+1]
                     
-                val_feature_contrib = self._predict_base_learner(best_model, val_X_feature).squeeze() * self.current_learning_rate
+                val_feature_contrib = self._predict_base_learner(model, val_X_feature).squeeze() * self.current_learning_rate
                 val_pred += val_feature_contrib
 
             # Update test predictions if available
             if X_test is not None and y_test is not None:
                 if self.base_learner == "linear":
-                    test_X_feature = X_test[:, best_feature_idx:best_feature_idx+1]
+                    test_X_feature = X_test[:, feature_idx:feature_idx+1]
                 else:
-                    test_X_feature = X_test[:, best_feature_idx:best_feature_idx+1]
+                    test_X_feature = X_test[:, feature_idx:feature_idx+1]
                     
-                test_feature_contrib = self._predict_base_learner(best_model, test_X_feature).squeeze() * self.current_learning_rate
+                test_feature_contrib = self._predict_base_learner(model, test_X_feature).squeeze() * self.current_learning_rate
                 test_pred += test_feature_contrib
             
             # Evaluate and track losses
             if self.track_history and (iteration + 1) % eval_freq == 0:
                 # Training loss using specified loss function (e.g., flooding)
-                train_loss = self.loss_fn(all_current_pred, y).item()
+                train_loss = self.loss_fn(current_pred, y).item()
                 self.history['train_loss'].append(train_loss)
                 
                 # Training MSE for evaluation purposes
-                train_mse = self.eval_loss_fn(all_current_pred, y).item()
+                train_mse = self.eval_loss_fn(current_pred, y).item()
                 self.history['train_mse'].append(train_mse)
                              
                 if X_val is not None and y_val is not None:
@@ -673,7 +590,6 @@ class ComponentwiseBoostingModel:
             'random_state': self.random_state,
             'loss': self.loss,
             'track_history': self.track_history,
-            'batch_mode': self.batch_mode,
             'base_learner': self.base_learner,
             'poly_degree': self.poly_degree,
             'tree_max_depth': self.tree_max_depth,

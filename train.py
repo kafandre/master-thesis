@@ -32,7 +32,6 @@ n_estimators = config.n_estimators
 learning_rate = config.learning_rate
 eval_freq = config.eval_freq
 flood_level = config.flood_level
-batch_size = config.batch_size
 
 # Create and train MSE model
 print("Training CWB model with MSE loss...")
@@ -51,7 +50,6 @@ mse_model.fit(
     y=y_train,
     X_test=X_test,
     y_test=y_test,
-    batch_size=train_size,    
     eval_freq=eval_freq,
     verbose=True,
     save_iterations=[1000],
@@ -64,16 +62,15 @@ flooding_model = ComponentwiseBoostingModel(
     n_estimators=n_estimators,
     learning_rate=learning_rate,
     random_state=SEED,
-    base_learner="tree",
+    base_learner="linear",
     tree_max_depth=3,    
     loss='flooding',
     track_history=True,
-    batch_mode=config.batch_mode,
     # Learning rate ascent parameters (for flooding)
     lr_ascent_mode="step",
     lr_ascent_factor=1.0,
     lr_ascent_step_size=50,
-    lr_max=1.0,
+    lr_max=0.1,
     # Top-k feature selection parameters
     top_k_early=1,
     top_k_late=1
@@ -84,7 +81,6 @@ flooding_model.fit(
     y=y_train,
     X_test=X_test,
     y_test=y_test,
-    batch_size=batch_size,
     flood_level=flood_level,
     eval_freq=eval_freq,
     verbose=True,
