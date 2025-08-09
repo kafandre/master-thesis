@@ -39,8 +39,10 @@ mse_model = ComponentwiseBoostingModel(
     n_estimators=n_estimators,
     learning_rate=learning_rate,
     random_state=SEED,
-    base_learner="polynomial",
+    base_learners=["polynomial"],
     poly_degree=2,
+    spline_knots=2,
+    degrees_of_freedom=1,
     loss='mse',
     track_history=True
     )
@@ -62,8 +64,10 @@ flooding_model = ComponentwiseBoostingModel(
     n_estimators=n_estimators,
     learning_rate=learning_rate,
     random_state=SEED,
-    base_learner="linear",
-    tree_max_depth=3,    
+    base_learners=["polynomial"],
+    poly_degree=2,
+    spline_knots=2,
+    degrees_of_freedom=1,
     loss='flooding',
     track_history=True,
     # Learning rate ascent parameters (for flooding)
@@ -72,8 +76,8 @@ flooding_model = ComponentwiseBoostingModel(
     lr_ascent_step_size=50,
     lr_max=0.1,
     # Top-k feature selection parameters
-    top_k_early=1,
-    top_k_late=1
+    top_k_early=10,
+    top_k_late=10
 )
 
 flooding_model.fit(
