@@ -12,4 +12,4 @@ class config:
     eval_freq = 1           # Evaluation frequency (iterations)
     
     # Flooding parameters
-    flood_level = 155        # Flooding level for the flooding loss
+    flood_level = 159       # Flooding level for the flooding loss
