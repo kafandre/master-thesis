@@ -2,7 +2,7 @@ import torch
 from torch.utils.data import random_split
 import numpy as np
 from data.NoisyData import Data
-from models.CWB_var_learner import ComponentwiseBoostingModel
+from models.ComponentwiseBoostingModel import ComponentwiseBoostingModel
 import matplotlib.pyplot as plt
 from config import config
 

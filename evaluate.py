@@ -1,4 +1,4 @@
-from models.BatchComponentwiseBoostingModel import ComponentwiseBoostingModel
+from models.ComponentwiseBoostingModel import ComponentwiseBoostingModel
 from data.NoisyData import Data
 from config import config
 from torch.utils.data import random_split
