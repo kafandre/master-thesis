@@ -34,7 +34,9 @@ class ComponentwiseBoostingModel:
         lr_ascent_factor: float = 1.0,  # Factor for learning rate increase
         lr_ascent_step_size: int = 50,  # For step mode: increase after this many iterations
         lr_max: float = 0.5,  # Maximum allowed learning rate
-        top_k_selection: int = 10 # Number of top features to randomly select from
+        top_k_selection: int = 10, # Number of top features to randomly select from
+        top_k_early: int = 1,
+        top_k_late: int = 1
 
     ):
         self.n_estimators = n_estimators
@@ -59,6 +61,8 @@ class ComponentwiseBoostingModel:
 
         # Top-k feature selection parameter
         self.top_k_selection = top_k_selection
+        self.top_k_early = top_k_early
+        self.top_k_late = top_k_late
         
         if self.batch_mode not in ["first", "all"]:
             raise ValueError("batch_mode must be either 'first' or 'all'")
@@ -366,9 +370,9 @@ class ComponentwiseBoostingModel:
 
             iterations_since_activation = iteration - self.lr_ascent_start_iter
             if iterations_since_activation < 50:  # First 50 iterations after activation
-                k = 3  # Conservative adaptation
+                k = self.top_k_early  # Conservative adaptation
             else:
-                k = 10  # Aggressive exploration
+                k = self.top_k_late  # Aggressive exploration
 
             top_k_indices = torch.topk(losses_tensor, k, largest=False).indices
             selected_idx = top_k_indices[torch.randint(0, k, (1,))].item()
