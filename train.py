@@ -5,15 +5,22 @@ from data.NoisyData import Data
 from models.ComponentwiseBoostingModel import ComponentwiseBoostingModel
 import matplotlib.pyplot as plt
 from config import config
+import logging
 
+# Configure basic logging
+logging.basicConfig(
+    filename='app.log',
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 
-# Set random seed for reproducibility   200 data points and 423 is overfit
-SEED = config.SEED
+# Set random seed for reproducibility    200 data points and 423 is overfit
+SEED = config.SEED+100
 torch.manual_seed(SEED)
 np.random.seed(SEED)
 
 # Generate synthetic data
-dataset = Data(data_amount=config.data_amount, seed=config.data_seed)
+dataset = Data(data_amount=config.data_amount, seed=SEED)
 
 # Split data into train and test sets
 train_size = int(config.train_split * len(dataset))
@@ -50,13 +57,16 @@ mse_model.fit(
     X=X_train, 
     y=y_train,
     X_test=X_test,
-    y_test=y_test,
-    batch_size=train_size,    
+    y_test=y_test, 
     eval_freq=eval_freq,
     verbose=True,
     save_iterations=[1000],
-    save_path="./checkpoints"      
+    save_path="./checkpoints/mse"      
 )
+
+# Print final losses
+mse_final_train_loss = mse_model.get_loss(X_train, y_train)
+mse_final_test_loss = mse_model.get_loss(X_test, y_test)
 
 # Create and train Flooding loss model
 print("\nTraining CWB model with Flooding loss...")
@@ -68,12 +78,6 @@ flooding_model = ComponentwiseBoostingModel(
     poly_degree=2,    
     loss='flooding',
     track_history=True,
-    batch_mode=config.batch_mode,
-    # Learning rate ascent parameters (for flooding)
-    lr_ascent_mode="step",
-    lr_ascent_factor=0.5,
-    lr_ascent_step_size=50,
-    lr_max=0.4,
     # Top-k feature selection parameters
     top_k_selection=3
 )
@@ -83,12 +87,11 @@ flooding_model.fit(
     y=y_train,
     X_test=X_test,
     y_test=y_test,
-    batch_size=batch_size,
-    flood_level=flood_level,
+    flood_level=mse_final_train_loss+3,
     eval_freq=eval_freq,
     verbose=True,
     save_iterations=[1000],
-    save_path="./checkpoints"    
+    save_path="./checkpoints/flooding"    
 )
 
 
@@ -122,6 +125,11 @@ ax1.set_ylabel('Loss')
 ax1.legend()
 ax1.grid(True)
 
+
+iterations = list(range(0, n_estimators + 1, eval_freq))
+if iterations[0] != 0:
+    iterations[0] = 0  # Ensure we include the initial point
+
 # Plot 2: CWB with Flooding
 flooding_test_len = len(flooding_model.history['test_loss'])
 
@@ -152,15 +160,43 @@ print("\nFlooding Model Feature Importances:")
 for i, importance in enumerate(flooding_model.feature_importances_):
     print(f"Feature {i}: {importance:.4f}")
 
-# Print final losses
-mse_final_train_loss = mse_model.get_loss(X_train, y_train)
-mse_final_test_loss = mse_model.get_loss(X_test, y_test)
 flood_final_train_loss = flooding_model.get_loss(X_train, y_train)
 flood_final_test_loss = flooding_model.get_loss(X_test, y_test)
 
 print("\nFinal Losses:")
-print(f"MSE Model - Train: {mse_final_train_loss:.4f}, Test: {mse_final_test_loss:.4f}")
-print(f"Flooding Model - Train: {flood_final_train_loss:.4f}, Test: {flood_final_test_loss:.4f}")
+print(f"MSE Model - Train: {mse_final_train_loss:.4f}, Test: {mse_final_test_loss:.4f} with used seeds: train {SEED}")
+print(f"Flooding Model - Train: {flood_final_train_loss:.4f}, Test: {flood_final_test_loss:.4f} with used seeds: train {SEED}")
+
+
+
+# # Load the model from iteration (interesting point in your double descent curve!)
+# loaded_model_1 = ComponentwiseBoostingModel.load_model("./checkpoints/mse/mse_polynomial_model_iteration_1000.pt")
+# loaded_model_2 = ComponentwiseBoostingModel.load_model("./checkpoints/flooding/flooding_polynomial_model_iteration_1000.pt")
+
+# for j in range(0,10):
+#     # Set random seed for reproducibility 200 data points and 423 is overfit
+#     EVAL_SEED = j+10
+
+#     # Generate synthetic data
+#     dataset = Data(data_amount=500, seed=EVAL_SEED)
+
+#     # Split data into train and test sets
+#     train_size = int(0.0 * len(dataset))
+#     test_size = len(dataset) - train_size
+#     train_dataset, test_dataset = random_split(dataset, [train_size, test_size])
+#     X_test = torch.stack([test_dataset[i][0] for i in range(len(test_dataset))])
+#     y_test = torch.tensor([test_dataset[i][1] for i in range(len(test_dataset))])
+
+#     # Evaluate
+#     test_pred = loaded_model_1.predict(X_test)
+#     test_mse = loaded_model_1.get_loss(X_test, y_test)
+#     print(f"Test MSE for mse model: {test_mse:.4f}")
+#     logging.info(f"Test MSE for mse model: {test_mse:.4f} with used seeds: train {SEED} and eval {EVAL_SEED}")
+
+#     test_pred = loaded_model_2.predict(X_test)
+#     test_mse = loaded_model_2.get_loss(X_test, y_test)
+#     print(f"Test MSE for flooding model: {test_mse:.4f}")
+#     logging.info(f"Test MSE for flooding model: {test_mse:.4f} with used seeds: train {SEED} and eval {EVAL_SEED}")
 
 # # Optional: Plot double descent analysis
 # print("\nAnalyzing double descent phenomenon...")
