@@ -15,7 +15,7 @@ logging.basicConfig(
 )
 
 # Set random seed for reproducibility    200 data points and 423 is overfit
-SEED = config.SEED+100
+SEED = config.SEED+105
 torch.manual_seed(SEED)
 np.random.seed(SEED)
 
@@ -79,7 +79,7 @@ flooding_model = ComponentwiseBoostingModel(
     loss='flooding',
     track_history=True,
     # Top-k feature selection parameters
-    top_k_selection=3
+    top_k_selection=5
 )
 
 flooding_model.fit(
@@ -87,7 +87,7 @@ flooding_model.fit(
     y=y_train,
     X_test=X_test,
     y_test=y_test,
-    flood_level=mse_final_train_loss+3,
+    flood_level=flood_level,
     eval_freq=eval_freq,
     verbose=True,
     save_iterations=[1000],

@@ -45,7 +45,7 @@ class ComponentwiseBoostingModel:
 
         # Momentum parameters
         self.momentum_decay = 0.95
-        self.momentum_strength = 1000
+        self.momentum_strength = 200
         self.feature_momentum = {}
 
         if self.base_learner not in ["linear", "polynomial", "tree"]:
@@ -318,17 +318,8 @@ class ComponentwiseBoostingModel:
 
         # Select feature based on whether stochastic selection is activated
         if self.stochastic_selection_activated:
-            # Use momentum-based selection with dynamic k
-            iterations_since_activation = iteration - self.stochastic_selection_start_iter
-            if iterations_since_activation < 50:  # First 50 iterations after activation
-                k = 3  # Conservative adaptation
-            elif iterations_since_activation < 150:
-                k = 10    
-            else:
-                k = 10  # Aggressive exploration
-            
-            selected_idx = self._simulated_momentum_selection(losses_tensor, k)
-            print(f"Momentum-based top-{k} selection: chose feature {selected_idx}")
+            selected_idx = self._simulated_momentum_selection(losses_tensor, self.top_k_selection)
+            print(f"Momentum-based top-{self.top_k_selection} selection: chose feature {selected_idx}")
         else:
             # Deterministic selection (original behavior)
             selected_idx = torch.argmin(losses_tensor).item()

@@ -5,7 +5,7 @@ from torch.utils.data import random_split
 import torch
 
 # Set random seed for reproducibility 200 data points and 423 is overfit
-SEED = 7
+SEED = 10
 
 # Generate synthetic data
 dataset = Data(data_amount=1000, seed=SEED)
@@ -18,8 +18,8 @@ X_test = torch.stack([test_dataset[i][0] for i in range(len(test_dataset))])
 y_test = torch.tensor([test_dataset[i][1] for i in range(len(test_dataset))])
 
 # Load the model from iteration (interesting point in your double descent curve!)
-loaded_model_1 = ComponentwiseBoostingModel.load_model("./checkpoints/mse_model_iteration_1000.pt")
-loaded_model_2 = ComponentwiseBoostingModel.load_model("./checkpoints/flooding_model_iteration_1000.pt")
+loaded_model_1 = ComponentwiseBoostingModel.load_model("./checkpoints/mse/mse_polynomial_model_iteration_1000.pt")
+loaded_model_2 = ComponentwiseBoostingModel.load_model("./checkpoints/flooding/flooding_polynomial_model_iteration_1000.pt")
 
 # Evaluate
 test_pred = loaded_model_1.predict(X_test)

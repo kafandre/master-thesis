@@ -14,13 +14,13 @@ class Data(Dataset):
         
         # Generate features - fewer samples, more features
         # Core predictive features (similar to original)
-        self.x[:, 0] = torch.randn(data_amount) * 1 + -1        # 1 + -1
-        self.x[:, 1] = torch.randn(data_amount) * 3 + 5         # 3 + 5
+        self.x[:, 0] = torch.randn(data_amount) * 2 + -1        # 1 + -1
+        self.x[:, 1] = torch.randn(data_amount) * 4 + 5         # 3 + 5
         self.x[:, 2] = torch.randn(data_amount) * 0.5 + 0
         
         # Highly noisy features that will cause overfitting
-        self.x[:, 3] = torch.randn(data_amount) * 10            # High variance
-        self.x[:, 4] = torch.randn(data_amount) * 8 - 4
+        self.x[:, 3] = torch.randn(data_amount) * 2            # High variance 10
+        self.x[:, 4] = torch.randn(data_amount) * 1.5 - 2       # 8 - 4
         
         # Correlated features (variations of the predictive ones)
         self.x[:, 5] = self.x[:, 0] * 0.9 + torch.randn(data_amount) * 0.3  # Correlated with x0
@@ -28,14 +28,14 @@ class Data(Dataset):
         
         # Add some outliers to specific samples
         if data_amount > 10:
-            outlier_indices = torch.randint(0, data_amount, (data_amount // 10,))
+            outlier_indices = torch.randint(0, data_amount, (data_amount // 20,))   # (data_amount // 10,)
             self.x[outlier_indices, 7] = torch.randn(len(outlier_indices)) * 20  # Extreme values
         else:
             self.x[:, 7] = torch.randn(data_amount) * 5
             
         # Irrelevant features that will tempt the model to find spurious patterns
         for i in range(8, 20):
-            self.x[:, i] = torch.randn(data_amount) * (i % 5 + 0.5)
+            self.x[:, i] = torch.randn(data_amount) * (i % 5 + 0.5)/2    # (i % 5 + 0.5)
             
         # Generate target values with complex, sporadic relationships
         # Only a few features actually matter, but with occasional interactions

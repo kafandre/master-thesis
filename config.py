@@ -1,7 +1,7 @@
 class config:
     # Data generation parameters
     data_amount = 500       # Number of data points to generate
-    SEED = 112              # Global random seed for reproducibility
+    SEED = 100              # Global random seed for reproducibility
     data_seed = 425         # Seed specifically for data generation
     train_split = 0.8       # Proportion of data to use for training
     train_size = int(data_amount * train_split)
@@ -14,4 +14,4 @@ class config:
     batch_mode = "all"      # 'all' or 'first'
     
     # Flooding parameters
-    flood_level = 160        # Flooding level for the flooding loss
+    flood_level = 90        # Flooding level for the flooding loss
