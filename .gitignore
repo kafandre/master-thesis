@@ -12,3 +12,8 @@ __pycache__/
 # all models
 checkpoints/
 flooding_model_checkpoints/
+
+# all log files
+*.log
+
+.DS_Store
