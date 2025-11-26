@@ -1,66 +1,70 @@
 import torch
 from torch.utils.data import Dataset
+import numpy as np
 
-# Creating the dataset
-class Data(Dataset):
-    def __init__(self, data_amount, seed=None):
-
+class NoisyData(Dataset):
+    def __init__(self, n_samples=500, dim_mode='low', seed=None, 
+                 drift_type='none', drift_magnitude='weak'):
+        
         if seed is not None:
             torch.manual_seed(seed)
+            np.random.seed(seed)
             
-        self.data_amount = data_amount
-        # Using many more features (20 instead of 5)
-        self.x = torch.zeros(data_amount, 20)
+        self.n_samples = n_samples
         
-        # Generate features - fewer samples, more features
-        # Core predictive features (similar to original)
-        self.x[:, 0] = torch.randn(data_amount) * 2 + -1        # 1 + -1
-        self.x[:, 1] = torch.randn(data_amount) * 4 + 5         # 3 + 5
-        self.x[:, 2] = torch.randn(data_amount) * 0.5 + 0
-        
-        # Highly noisy features that will cause overfitting
-        self.x[:, 3] = torch.randn(data_amount) * 2            # High variance 10
-        self.x[:, 4] = torch.randn(data_amount) * 1.5 - 2       # 8 - 4
-        
-        # Correlated features (variations of the predictive ones)
-        self.x[:, 5] = self.x[:, 0] * 0.9 + torch.randn(data_amount) * 0.3  # Correlated with x0
-        self.x[:, 6] = self.x[:, 1] * 1.1 - torch.randn(data_amount) * 0.2  # Correlated with x1
-        
-        # Add some outliers to specific samples
-        if data_amount > 10:
-            outlier_indices = torch.randint(0, data_amount, (data_amount // 20,))   # (data_amount // 10,)
-            self.x[outlier_indices, 7] = torch.randn(len(outlier_indices)) * 20  # Extreme values
+        # Dimensions
+        if dim_mode == 'low':
+            self.n_features = 5
+        elif dim_mode == 'high':
+            self.n_features = 50
         else:
-            self.x[:, 7] = torch.randn(data_amount) * 5
+            raise ValueError(f"Unknown dim_mode: {dim_mode}")
             
-        # Irrelevant features that will tempt the model to find spurious patterns
-        for i in range(8, 20):
-            self.x[:, i] = torch.randn(data_amount) * (i % 5 + 0.5)/2    # (i % 5 + 0.5)
+        self.x = torch.randn(n_samples, self.n_features)
+        
+        # --- Define Drift Parameters ---
+        self.coef_meaningful = 3.0
+        self.coef_interaction = 2.0
+        self.noise_mean = 0.0
+        
+        # Apply Drifts
+        if drift_type == 'meaningful':
+            # Concept Drift: The rule P(Y|X) changes
+            # We change the coefficients of the signal features
+            factor = 1.5 if drift_magnitude == 'strong' else 1.2
+            self.coef_meaningful *= factor
+            self.coef_interaction *= factor
             
-        # Generate target values with complex, sporadic relationships
-        # Only a few features actually matter, but with occasional interactions
-        self.y = (-5 +
-                  torch.mul(self.x[:, 0], 2) +
-                  torch.mul(self.x[:, 1], 1) +
-                  torch.mul(self.x[:, 2], 3.5) +
-                  # Add some interactions that will be hard to generalize
-                  torch.mul(self.x[:, 0] * self.x[:, 1], 0.3) +
-                  # Add a non-linear transformation that the model might overfit to
-                  torch.mul(torch.sin(self.x[:, 3]), 1.5) +
-                # Add spurious interactions:
-                torch.mul(self.x[:, 4] * self.x[:, 8], 0.3) +
-                torch.mul(torch.cos(self.x[:, 12]), 0.5) +
-                torch.mul(self.x[:, 6] ** 2, 0.1) +                  
-                  # Add small effects from noise features to tempt overfitting
-                  torch.mul(self.x[:, 10], 0.1) +
-                  torch.mul(self.x[:, 15], 0.2) +
-                  # Very high noise level relative to signal
-                  torch.randn(data_amount) * 10)
+        elif drift_type == 'noise':
+            # Covariate Shift on Noise: P(X_noise) changes
+            # We shift the distribution of the NOISY features
+            shift = 5.0 if drift_magnitude == 'strong' else 2.0
+            self.noise_mean = shift
+            
+            # Apply shift to noise features (indices 3 onwards)
+            if self.n_features > 3:
+                self.x[:, 3:] += self.noise_mean
+
+        # --- Generate Target ---
+        # Features 0, 1, 2 are signal. The rest are noise.
+        signal = (self.coef_meaningful * self.x[:, 0] + 
+                  self.coef_meaningful * self.x[:, 1] - 
+                  self.coef_meaningful * self.x[:, 2] +
+                  self.coef_interaction * self.x[:, 0] * self.x[:, 1]) 
         
-        self.len = self.x.shape[0]  # Number of samples
+        # Add pure noise (irreducible error)
+        # This is the "True Noise" we use to calibrate Flooding
+        epsilon = torch.randn(n_samples) * 1.0 
         
+        self.y = signal + epsilon
+        
+        # Save true noise variance for Flooding calculation
+        self.true_noise_var = 1.0
+        
+        self.len = self.n_samples
+
     def __getitem__(self, idx):
         return self.x[idx], self.y[idx]
-        
+
     def __len__(self):
         return self.len

@@ -1,660 +1,224 @@
 import torch
-from torch.utils.data import TensorDataset, DataLoader
 import numpy as np
-from typing import List, Tuple, Optional, Callable, Dict
-import random
-import os
-import math
+from typing import Optional
 from sklearn.tree import DecisionTreeRegressor
-from sklearn.preprocessing import PolynomialFeatures
 from sklearn.linear_model import LinearRegression
-
+from sklearn.preprocessing import PolynomialFeatures
 
 class ComponentwiseBoostingModel:
-    """
-    Componentwise Gradient Boosting with various regression base learners.
-    Each boosting iteration selects the feature that most reduces the loss.
-
-    - Uses specified loss during training
-    - Uses MSE for evaluation/testing
-    """
-    
     def __init__(
         self, 
         n_estimators: int = 100,
-        learning_rate: float = 0.01,
-        random_state: Optional[int] = None,
-        loss: str = 'mse',  # 'mse' for mean square error, 'flooding' for flooding loss
-        track_history: bool = True,
-        base_learner: str = "linear",  # "linear", "polynomial", "tree"
-        poly_degree: int = 2,  # For polynomial base learner
-        tree_max_depth: int = 3,  # For tree base learner
-        top_k_selection: int = 10 # Number of top features to randomly select from
+        learning_rate: float = 0.1,
+        base_learner: str = "polynomial",
+        poly_degree: int = 2,
+        loss: str = 'mse', # 'mse' or 'flooding'
+        flood_level: float = 0.0,
+        use_momentum: bool = False,
+        use_top_k: bool = False,
+        top_k: int = 5,
+        momentum_decay: float = 0.9,
+        momentum_strength: float = 1.0,
+        random_state: Optional[int] = None
     ):
         self.n_estimators = n_estimators
         self.learning_rate = learning_rate
-        self.random_state = random_state
-        self.loss = loss
-        self.track_history = track_history
         self.base_learner = base_learner
         self.poly_degree = poly_degree
-        self.tree_max_depth = tree_max_depth
-
-        # Top-k feature selection parameter
-        self.top_k_selection = top_k_selection
-
-        # Momentum parameters
-        self.momentum_decay = 0.95
-        self.momentum_strength = 200
-        self.feature_momentum = {}
-
-        if self.base_learner not in ["linear", "polynomial", "tree"]:
-            raise ValueError("base_learner must be one of: 'linear', 'polynomial', or 'tree'")
-             
-        # Will be set during fitting
-        self.estimators_: List[Tuple[int, object]] = []
-        self.feature_importances_ = None
-        self.intercept_ = None
-        self.loss_fn = None
-        self.eval_loss_fn = None  # Always MSE for evaluation
-        self.flood_level = None
+        self.loss = loss
+        self.flood_level = flood_level
         
-        # Track when stochastic selection starts
-        self.stochastic_selection_start_iter = None
-
-        # History tracking for double descent analysis
-        self.history: Dict[str, List[float]] = {
-            'train_loss': [],          # Using training loss (e.g., flooding)
-            'train_mse': [],           # Using MSE for evaluation
-            'val_loss': [],            # Using MSE for evaluation
-            'test_loss': [],           # Using MSE for evaluation
-            'selected_features': []           
-        }
+        self.use_momentum = use_momentum
+        self.use_top_k = use_top_k
+        self.top_k = top_k
+        self.momentum_decay = momentum_decay
+        self.momentum_strength = momentum_strength
         
+        self.random_state = random_state
         if random_state is not None:
             torch.manual_seed(random_state)
             np.random.seed(random_state)
-    
-    def _init_estimators(self, y: torch.Tensor):
-        """Initialize with the mean prediction."""
-        self.intercept_ = torch.mean(y).item()
+            
         self.estimators_ = []
+        self.intercept_ = 0.0
+        self.feature_momentum = {} 
         
-        self.stochastic_selection_activated = False
-        self.stochastic_selection_start_iter = None
-
-        # Reset momentum tracking
-        self.feature_momentum = {}
-
-        # Reset history
+        # History
         self.history = {
-            'train_loss': [],          # Using training loss (e.g., flooding)
-            'train_mse': [],           # Using MSE for evaluation
-            'val_loss': [],            # Using MSE for evaluation
-            'test_loss': [],           # Using MSE for evaluation
-            'selected_features': []      
+            'train_loss': [], 'val_loss': [], 'test_loss': [], 
+            'selected_features': []
         }
 
-    def _get_loss_fn(self, loss_type: str, **kwargs) -> Callable:
-        """
-        Get the appropriate loss function based on the specified type.
+    def _get_gradient(self, y_pred, y):
+        """Returns gradient of Loss w.r.t prediction (dL/dPred)"""
+        grad = (y_pred - y)
         
-        Args:
-            loss_type: Type of loss function ('mse', 'flooding', etc.)
-            **kwargs: Additional parameters for the loss function
+        if self.loss == 'flooding':
+            mse = torch.mean((y_pred - y)**2)
+            if mse < self.flood_level:
+                # Gradient Ascent (Push away from 0)
+                grad *= -1.0 
+        
+        return grad
+
+    def _select_feature(self, losses_tensor: torch.Tensor) -> int:
+        n_features = len(losses_tensor)
+        
+        # 1. Apply Momentum Adjustment
+        if self.use_momentum:
+            if len(self.feature_momentum) == 0:
+                for i in range(n_features): self.feature_momentum[i] = 0.0
             
-        Returns:
-            Loss function
-        """
-        if loss_type == 'mse':
-            return lambda y_pred, y: torch.mean((y_pred - y) ** 2)
-        elif loss_type == 'flooding':
-            self.flood_level = kwargs.get('flood_level', 0.01)
-            return lambda y_pred, y: (abs(torch.mean((y_pred - y) ** 2) - self.flood_level) + self.flood_level)
+            # Update Momentum: Inversely proportional to loss
+            for i in range(n_features):
+                self.feature_momentum[i] *= self.momentum_decay
+                score = 1.0 / (losses_tensor[i].item() + 1e-6)
+                self.feature_momentum[i] += self.momentum_strength * score
+                
+            # Higher momentum -> Lower Adjusted Loss (Better chance to be picked)
+            momentum_vec = torch.tensor([self.feature_momentum[i] for i in range(n_features)])
+            adjusted_losses = losses_tensor - momentum_vec
         else:
-            raise ValueError(f"Unsupported loss function: {loss_type}")
-        
-    def _get_eval_loss_fn(self) -> Callable:
-        """
-        Get the evaluation loss function (always MSE).
-        
-        Returns:
-            MSE loss function
-        """
-        return lambda y_pred, y: torch.mean((y_pred - y) ** 2)
-    
-    def _get_gradient_fn(self, loss_type: str) -> Callable:
-        """
-        Get the gradient function for the specified loss type.
-        
-        Args:
-            loss_type: Type of loss function
-            
-        Returns:
-            Gradient function that takes y_pred and y and returns gradients
-        """
-        if loss_type == 'mse':
-            # For MSE: gradient is (y_pred - y)
-            return lambda y_pred, y: (y_pred - y).unsqueeze(1) if (y_pred - y).dim() == 1 else (y_pred - y)
-        elif loss_type == 'flooding':
-            # For flooding loss: gradient is (y_pred - y) * sign(MSE - flood_level)
-            def flooding_gradient(y_pred, y):
-                # Calculate batch MSE
-                mse = torch.mean((y_pred - y) ** 2)
-                
-                # Standard MSE gradient
-                grad = y_pred - y
+            adjusted_losses = losses_tensor
 
-                # Calculate sign based on whether we're below or above flood level
-                sign = -1.0 if mse < self.flood_level else 1.0
-                
-                # Apply sign to gradient (negative if below flood level, positive if above)
-                # This pushes away from minimum when below flood level
-                grad = sign * grad
-                
-                # Check if mse is below flood level
-                if mse < self.flood_level:
-                    print(f"Flipping gradient! MSE: {mse:.6f}, Flood level: {self.flood_level:.6f}")        
-                
-                return grad.unsqueeze(1) if grad.dim() == 1 else grad
-            return flooding_gradient
-
+        # 2. Top-K Filtering
+        if self.use_top_k:
+            k = min(self.top_k, n_features)
+            # Get indices of the k smallest adjusted losses
+            top_k_indices = torch.topk(adjusted_losses, k, largest=False).indices
+            # Randomly select one from bucket
+            selected_idx = top_k_indices[torch.randint(0, k, (1,))].item()
         else:
-            raise ValueError(f"Unsupported loss function: {loss_type}")
-
-    def _create_base_learner(self, feature_idx: int) -> object:
-        """
-        Create a base learner based on the specified type.
-        
-        Args:
-            feature_idx: Index of the feature (not used for all learner types)
+            # Greedy
+            selected_idx = torch.argmin(adjusted_losses).item()
             
-        Returns:
-            Base learner object
-        """
+        return selected_idx
+
+    def fit(self, X_train, y_train, X_val=None, y_val=None, X_test=None, y_test=None):
+        self.intercept_ = torch.mean(y_train).item()
+        curr_pred_train = torch.full_like(y_train, self.intercept_)
+        
+        curr_pred_val = None
+        if X_val is not None:
+            curr_pred_val = torch.full_like(y_val, self.intercept_)
+        
+        curr_pred_test = None
+        if X_test is not None:
+            curr_pred_test = torch.full_like(y_test, self.intercept_)
+
+        n_features = X_train.shape[1]
+        
+        # Best Model Tracking
+        best_val_loss = float('inf')
+        self.best_iteration_ = 0
+
+        for i in range(self.n_estimators):
+            grad = self._get_gradient(curr_pred_train, y_train)
+            target = -grad 
+
+            feature_losses = []
+            feature_models = []
+            
+            # Evaluate all features
+            for f_idx in range(n_features):
+                x_f = X_train[:, f_idx:f_idx+1]
+                model = self._create_base_learner()
+                model = self._fit_base_learner(model, x_f, target)
+                
+                # Calculate loss against gradient
+                pred = self._predict_base_learner(model, x_f).squeeze()
+                loss = torch.mean((pred - target.squeeze())**2)
+                
+                feature_losses.append(loss)
+                feature_models.append(model)
+            
+            # Select Best Feature
+            best_idx = self._select_feature(torch.tensor(feature_losses))
+            best_model = feature_models[best_idx]
+            
+            # Update State
+            self.estimators_.append((best_idx, best_model))
+            self.history['selected_features'].append(best_idx)
+            
+            # Update Predictions
+            # Train
+            x_f_train = X_train[:, best_idx:best_idx+1]
+            update = self._predict_base_learner(best_model, x_f_train).squeeze() * self.learning_rate
+            curr_pred_train += update
+            
+            # Val
+            if X_val is not None:
+                x_f_val = X_val[:, best_idx:best_idx+1]
+                update_val = self._predict_base_learner(best_model, x_f_val).squeeze() * self.learning_rate
+                curr_pred_val += update_val
+                
+                val_mse = torch.mean((curr_pred_val - y_val)**2).item()
+                self.history['val_loss'].append(val_mse)
+                
+                if val_mse < best_val_loss:
+                    best_val_loss = val_mse
+                    self.best_iteration_ = i + 1
+            
+            # Test
+            if X_test is not None:
+                x_f_test = X_test[:, best_idx:best_idx+1]
+                update_test = self._predict_base_learner(best_model, x_f_test).squeeze() * self.learning_rate
+                curr_pred_test += update_test
+                test_mse = torch.mean((curr_pred_test - y_test)**2).item()
+                self.history['test_loss'].append(test_mse)
+
+            # Train Loss
+            # Note: For history we log MSE to be comparable, even if we optimize Flooding
+            train_mse = torch.mean((curr_pred_train - y_train)**2).item()
+            self.history['train_loss'].append(train_mse)
+
+    def _create_base_learner(self):
         if self.base_learner == "linear":
             return torch.nn.Linear(1, 1, bias=False)
         elif self.base_learner == "polynomial":
-            # Return a polynomial model wrapper
             return PolynomialRegressionWrapper(degree=self.poly_degree)
-        elif self.base_learner == "tree":
-            return DecisionTreeRegressor(
-                max_depth=self.tree_max_depth,
-                random_state=self.random_state
-            )
-        else:
-            raise ValueError(f"Unknown base learner: {self.base_learner}")
 
-    def _fit_base_learner(self, model: object, X_feature: torch.Tensor, y_target: torch.Tensor) -> object:
-        """
-        Fit a base learner to the data.
-        
-        Args:
-            model: Base learner model
-            X_feature: Input features (single feature for linear, multiple for others)
-            y_target: Target values
-            
-        Returns:
-            Fitted model
-        """
+    def _fit_base_learner(self, model, X, y):
         if self.base_learner == "linear":
-            # Original normal equation approach
-            X_t = X_feature.t()
-            beta = torch.mm(torch.mm(torch.inverse(torch.mm(X_t, X_feature) + 1e-10 * torch.eye(1)), X_t), y_target)
+            xtx = torch.matmul(X.t(), X)
+            xty = torch.matmul(X.t(), y.unsqueeze(1) if y.dim()==1 else y)
+            beta = xty / (xtx + 1e-8)
             model.weight.data = beta.t()
             return model
-            
-        elif self.base_learner in ["polynomial", "tree"]:
-            # Convert to numpy for sklearn compatibility
-            X_np = X_feature.detach().numpy()
-            y_np = y_target.squeeze().detach().numpy()
-            
-            # Fit the model
+        else:
+            X_np = X.detach().numpy()
+            y_np = y.detach().numpy()
             model.fit(X_np, y_np)
             return model
-            
-        else:
-            raise ValueError(f"Unknown base learner: {self.base_learner}")
 
-    def _predict_base_learner(self, model: object, X_feature: torch.Tensor) -> torch.Tensor:
-        """
-        Make predictions with a base learner.
-        
-        Args:
-            model: Fitted base learner
-            X_feature: Input features
-            
-        Returns:
-            Predictions as torch tensor
-        """
+    def _predict_base_learner(self, model, X):
         if self.base_learner == "linear":
-            return model(X_feature)
-            
-        elif self.base_learner in ["polynomial", "tree"]:
-            # Convert to numpy, predict, convert back to torch
-            X_np = X_feature.detach().numpy()
-            pred_np = model.predict(X_np)
-            return torch.tensor(pred_np, dtype=torch.float32).unsqueeze(1)
-            
+            return model(X)
         else:
-            raise ValueError(f"Unknown base learner: {self.base_learner}")
+            X_np = X.detach().numpy()
+            pred = model.predict(X_np)
+            return torch.tensor(pred, dtype=torch.float32).unsqueeze(1)
 
-    def _simulated_momentum_selection(self, losses_tensor, k):
-        """Apply momentum-based feature selection."""
-        n_features = len(losses_tensor)
+    def predict(self, X, use_best_model=False):
+        pred = torch.full((X.shape[0],), self.intercept_)
         
-        # Update momentum scores for all features
-        for i, loss in enumerate(losses_tensor):
-            if i not in self.feature_momentum:
-                self.feature_momentum[i] = 0.0
+        limit = self.best_iteration_ if use_best_model and self.best_iteration_ > 0 else len(self.estimators_)
+        estimators_to_use = self.estimators_[:limit]
             
-            # Decay old momentum
-            self.feature_momentum[i] *= self.momentum_decay
+        for f_idx, model in estimators_to_use:
+            x_f = X[:, f_idx:f_idx+1]
+            pred += self._predict_base_learner(model, x_f).squeeze() * self.learning_rate
             
-            # Add momentum based on how good this feature was (lower loss = higher momentum boost)
-            momentum_boost = self.momentum_strength * (1.0 / (1.0 + loss.item()))
-            self.feature_momentum[i] += momentum_boost
-        
-        # Bias losses by momentum (subtract momentum to make good features more likely)
-        momentum_bias = torch.tensor([self.feature_momentum.get(i, 0.0) for i in range(n_features)])
-        adjusted_losses = losses_tensor - momentum_bias
-        
-        # Select from top-k based on adjusted losses
-        top_k_indices = torch.topk(adjusted_losses, k, largest=False).indices
-        selected_idx = top_k_indices[torch.randint(0, k, (1,))].item()
-        
-        return selected_idx
-
-    def _componentwise_fit(
-        self, 
-        X: torch.Tensor, 
-        negative_gradients: torch.Tensor,
-        loss_fn: Callable,
-        iteration: int
-    ) -> Tuple[int, object]:
-        """
-        Fit a separate model for each feature and select the best one.
-        
-        Args:
-            X: Input features tensor
-            negative_gradients: Negative gradients to fit against
-            loss_fn: Loss function to evaluate models
-            
-        Returns:
-            Tuple of (best_feature_idx, best_model)
-        """
-        n_features = X.shape[1]
-
-        losses = []
-        models = []
-
-        # Ensure negative_gradients is 2D for compatibility
-        if negative_gradients.dim() == 1:
-            negative_gradients = negative_gradients.unsqueeze(1)
-
-        # Try each feature separately
-        for feature_idx in range(n_features):
-            # Get feature data
-            if self.base_learner == "linear":
-                X_feature = X[:, feature_idx:feature_idx+1]
-            else:
-                # For polynomial and tree learners, we might want to use all features
-                # but we'll still iterate through them for consistency
-                X_feature = X[:, feature_idx:feature_idx+1]
-            
-            # Create and fit base learner
-            model = self._create_base_learner(feature_idx)
-            model = self._fit_base_learner(model, X_feature, negative_gradients)
-            
-            # Compute predictions and loss
-            preds = self._predict_base_learner(model, X_feature)
-            loss = loss_fn(preds.squeeze(), negative_gradients.squeeze()).item()
-
-            losses.append(loss)
-            models.append(model)
-
-        # Convert losses to tensor for easier manipulation
-        losses_tensor = torch.tensor(losses)
-
-        # Select feature based on whether stochastic selection is activated
-        if self.stochastic_selection_activated:
-            selected_idx = self._simulated_momentum_selection(losses_tensor, self.top_k_selection)
-            print(f"Momentum-based top-{self.top_k_selection} selection: chose feature {selected_idx}")
-        else:
-            # Deterministic selection (original behavior)
-            selected_idx = torch.argmin(losses_tensor).item()
-
-        return selected_idx, models[selected_idx]
-
-    def fit(
-        self, 
-        X: torch.Tensor, 
-        y: torch.Tensor, 
-        loss: Optional[str] = None,
-        X_val: Optional[torch.Tensor] = None,
-        y_val: Optional[torch.Tensor] = None,
-        X_test: Optional[torch.Tensor] = None,
-        y_test: Optional[torch.Tensor] = None,
-        early_stopping: bool = False,
-        patience: int = 100,
-        eval_freq: int = 1,
-        verbose: bool = False,
-        save_iterations: Optional[List[int]] = None,
-        save_path: str = "./checkpoints",
-        **loss_params
-    ) -> 'ComponentwiseBoostingModel':
-        """
-        Fit the boosting model.
-        """
-
-        # Create save directory if it doesn't exist
-        if save_iterations and len(save_iterations) > 0:
-            os.makedirs(save_path, exist_ok=True)
-
-        # Set or update loss function
-        loss_type = loss if loss is not None else self.loss
-        # Set training loss function based on specified loss type
-        self.loss_fn = self._get_loss_fn(loss_type, **loss_params)
-        # Set evaluation loss function always to MSE
-        self.eval_loss_fn = self._get_eval_loss_fn()
-        gradient_fn = self._get_gradient_fn(loss_type)
-        
-        # Initialize model with mean prediction
-        self._init_estimators(y)
-        
-        # Current predictions for all data points
-        all_current_pred = torch.full_like(y, self.intercept_)
-        
-        # For validation data
-        if X_val is not None and y_val is not None:
-            val_pred = torch.full_like(y_val, self.intercept_)
-            best_val_loss = float('inf')
-            best_iteration = 0
-            no_improvement_count = 0
-        
-        # For test data
-        if X_test is not None and y_test is not None:
-            test_pred = torch.full_like(y_test, self.intercept_)
-        
-        # Feature importance tracking
-        n_features = X.shape[1]
-        feature_counts = np.zeros(n_features)
-
-        # Initial loss calculation before training
-        if self.track_history:
-            # Training loss using the specified loss function (e.g., flooding)
-            train_loss = self.loss_fn(all_current_pred, y).item()
-            self.history['train_loss'].append(train_loss)
-            
-            # Training MSE for evaluation purposes
-            train_mse = self.eval_loss_fn(all_current_pred, y).item()
-            self.history['train_mse'].append(train_mse)
-
-            if X_val is not None and y_val is not None:
-                # Validation loss always uses MSE
-                val_loss = self.eval_loss_fn(val_pred, y_val).item()
-                self.history['val_loss'].append(val_loss)
-            
-            if X_test is not None and y_test is not None:
-                # Test loss always uses MSE
-                test_loss = self.eval_loss_fn(test_pred, y_test).item()
-                self.history['test_loss'].append(test_loss)
-
-        # Initialize history tracking for flood level if using flooding loss
-        if self.track_history and loss_type == 'flooding':
-            self.history["flood_level"] = []
-
-        # Boosting iterations
-        for iteration in range(self.n_estimators):
-            # Track flood level if using flooding loss
-            if loss_type == 'flooding' and self.track_history:
-                self.history["flood_level"].append(self.flood_level)
-
-            # Compute negative gradients for the full dataset
-            negative_gradients = -gradient_fn(all_current_pred, y)
-            
-            # Find best feature and fit a base model
-            feature_idx, model = self._componentwise_fit(X, negative_gradients, self.loss_fn, iteration)
-                
-            # Update feature importance count
-            feature_counts[feature_idx] += 1
-                
-            # Store the estimator
-            self.estimators_.append((feature_idx, model))
-            
-            # Track selected feature
-            if self.track_history:
-                self.history['selected_features'].append(feature_idx)
-
-            # Activate stochastic selection when loss is near flood level
-            train_loss = self.loss_fn(all_current_pred, y).item()
-            if (self.loss == 'flooding' and not self.stochastic_selection_activated and 
-                train_loss < self.flood_level + 0.1):
-                self.stochastic_selection_activated = True
-                self.stochastic_selection_start_iter = iteration
-                print(f"Stochastic top-k selection activated at iteration {iteration+1}!")
-
-            # Update predictions for ALL data points
-            if self.base_learner == "linear":
-                X_feature = X[:, feature_idx:feature_idx+1]
-            else:
-                X_feature = X[:, feature_idx:feature_idx+1]
-                
-            feature_contrib = self._predict_base_learner(model, X_feature).squeeze() * self.learning_rate
-            all_current_pred += feature_contrib
-
-            # Update validation predictions if available
-            if X_val is not None and y_val is not None:
-                if self.base_learner == "linear":
-                    val_X_feature = X_val[:, feature_idx:feature_idx+1]
-                else:
-                    val_X_feature = X_val[:, feature_idx:feature_idx+1]
-                    
-                val_feature_contrib = self._predict_base_learner(model, val_X_feature).squeeze() * self.learning_rate
-                val_pred += val_feature_contrib
-
-            # Update test predictions if available
-            if X_test is not None and y_test is not None:
-                if self.base_learner == "linear":
-                    test_X_feature = X_test[:, feature_idx:feature_idx+1]
-                else:
-                    test_X_feature = X_test[:, feature_idx:feature_idx+1]
-                    
-                test_feature_contrib = self._predict_base_learner(model, test_X_feature).squeeze() * self.learning_rate
-                test_pred += test_feature_contrib
-            
-            # Evaluate and track losses
-            if self.track_history and (iteration + 1) % eval_freq == 0:
-                # Training loss using specified loss function (e.g., flooding)
-                train_loss = self.loss_fn(all_current_pred, y).item()
-                self.history['train_loss'].append(train_loss)
-                
-                # Training MSE for evaluation purposes
-                train_mse = self.eval_loss_fn(all_current_pred, y).item()
-                self.history['train_mse'].append(train_mse)
-                             
-                if X_val is not None and y_val is not None:
-                    # Validation loss always uses MSE
-                    val_loss = self.eval_loss_fn(val_pred, y_val).item()
-                    self.history['val_loss'].append(val_loss)
-                    
-                    # Check for early stopping
-                    if early_stopping:
-                        if val_loss < best_val_loss:
-                            best_val_loss = val_loss
-                            best_iteration = iteration
-                            no_improvement_count = 0
-                        else:
-                            no_improvement_count += 1
-                            if no_improvement_count >= patience:
-                                if verbose:
-                                    print(f"Early stopping at iteration {iteration+1}. Best iteration: {best_iteration+1}.")
-                                break
-                
-                if X_test is not None and y_test is not None:
-                    # Test loss always uses MSE
-                    test_loss = self.eval_loss_fn(test_pred, y_test).item()
-                    self.history['test_loss'].append(test_loss)
-                
-                # verbose output
-                if verbose and (iteration + 1) % (eval_freq * 10) == 0:
-                    print(f"Iteration {iteration+1}/{self.n_estimators}, ", end="")
-                    print(f"Train Loss: {train_loss:.6f} (Train MSE: {train_mse:.6f})", end="")
-                    if X_val is not None and y_val is not None:
-                        print(f", Val MSE: {val_loss:.6f}", end="")
-                    if X_test is not None and y_test is not None:
-                        print(f", Test MSE: {test_loss:.6f}", end="")
-                    if loss_type == 'flooding':
-                        print(f", Flood: {self.flood_level:.6f}")
-                    else:
-                        print("")
-
-            # Check if we should save the model at this iteration
-            if save_iterations and (iteration + 1) in save_iterations:
-                checkpoint_path = os.path.join(save_path, f"{loss_type}_{self.base_learner}_model_iteration_{iteration+1}.pt")
-                self._save_model(checkpoint_path)
-                if verbose:
-                    print(f"\nSaved model checkpoint at iteration {iteration+1} to {checkpoint_path}\n")
-
-        # Calculate feature importances
-        self.feature_importances_ = feature_counts / np.sum(feature_counts)
-        
-        return self
-
-    def _save_model(self, path: str) -> None:
-        """
-        Save the model to a file.
-        
-        Args:
-            path: Path to save the model
-        """
-        # Create a dictionary with all the model state
-        model_state = {
-            'n_estimators': self.n_estimators,
-            'learning_rate': self.learning_rate,
-            'random_state': self.random_state,
-            'loss': self.loss,
-            'track_history': self.track_history,
-            'base_learner': self.base_learner,
-            'poly_degree': self.poly_degree,
-            'tree_max_depth': self.tree_max_depth,
-            'top_k_selection': self.top_k_selection,
-            'stochastic_selection_start_iter': self.stochastic_selection_start_iter,
-            'estimators_': self.estimators_,
-            'feature_importances_': self.feature_importances_,
-            'intercept_': self.intercept_,
-            'flood_level': self.flood_level,
-            'history': self.history
-        }
-        
-        # Save to file using torch.save
-        torch.save(model_state, path)
-
-    @classmethod
-    def load_model(cls, path: str) -> 'ComponentwiseBoostingModel':
-        # Load the state dictionary
-        model_state = torch.load(path)
-
-        # Create a new instance with the basic parameters
-        model = cls(
-            n_estimators=model_state['n_estimators'],
-            learning_rate=model_state['learning_rate'],
-            random_state=model_state['random_state'],
-            loss=model_state['loss'],
-            track_history=model_state['track_history'],
-            base_learner=model_state['base_learner'],
-            poly_degree=model_state['poly_degree'],
-            tree_max_depth=model_state['tree_max_depth'],
-            top_k_selection=model_state['top_k_selection'],
-        )
-
-        # Restore all the trained state
-        model.estimators_ = model_state['estimators_']
-        model.feature_importances_ = model_state['feature_importances_']
-        model.intercept_ = model_state['intercept_']
-        model.flood_level = model_state['flood_level']
-        model.history = model_state['history']
-        model.stochastic_selection_start_iter = model_state.get('stochastic_selection_start_iter', None)
-
-        # Reinitialize loss functions since they can't be serialized
-        if model_state['loss'] == 'mse':
-            model.loss_fn = model._get_loss_fn('mse')
-        elif model_state['loss'] == 'flooding':
-            model.loss_fn = model._get_loss_fn('flooding', flood_level=model.flood_level)
-
-        # Always set the evaluation loss function to MSE
-        model.eval_loss_fn = model._get_eval_loss_fn()
-
-        return model
-
-    def predict(self, X: torch.Tensor) -> torch.Tensor:
-        """
-        Generate predictions for the input data.
-        
-        Args:
-            X: Input features tensor of shape (n_samples, n_features)
-            
-        Returns:
-            Predictions tensor of shape (n_samples,)
-        """
-        # Start with the intercept
-        predictions = torch.full((X.shape[0],), self.intercept_, device=X.device)
-        
-        # Add contribution from each estimator
-        for feature_idx, model in self.estimators_:
-            if self.base_learner == "linear":
-                X_feature = X[:, feature_idx:feature_idx+1]
-            else:
-                X_feature = X[:, feature_idx:feature_idx+1]
-                
-            predictions += self._predict_base_learner(model, X_feature).squeeze() * self.learning_rate
-
-        return predictions
-    
-    def get_loss(self, X: torch.Tensor, y: torch.Tensor, use_training_loss: bool = False) -> float:
-        """
-        Calculate the loss on the given data.
-        
-        Args:
-            X: Input features tensor
-            y: True target values
-            use_training_loss: If True, use the training loss function (e.g., flooding);
-                              if False, use evaluation loss (MSE)
-            
-        Returns:
-            Loss value
-        """
-        if self.loss_fn is None or self.eval_loss_fn is None:
-            raise ValueError("Model must be fitted before calculating loss")
-        
-        predictions = self.predict(X)
-        
-        if use_training_loss:
-            return self.loss_fn(predictions, y).item()
-        else:
-            return self.eval_loss_fn(predictions, y).item()
-
+        return pred
 
 class PolynomialRegressionWrapper:
-    """
-    Wrapper for polynomial regression to maintain consistent interface.
-    """
-    def __init__(self, degree: int = 2):
+    def __init__(self, degree):
         self.degree = degree
-        self.poly_features = PolynomialFeatures(degree=degree, include_bias=False)
-        self.linear_model = LinearRegression()
-        self.fitted = False
-    
-    def fit(self, X: np.ndarray, y: np.ndarray):
-        """Fit polynomial regression model."""
-        X_poly = self.poly_features.fit_transform(X)
-        self.linear_model.fit(X_poly, y)
-        self.fitted = True
-        return self
-    
-    def predict(self, X: np.ndarray) -> np.ndarray:
-        """Make predictions with polynomial regression model."""
-        if not self.fitted:
-            raise ValueError("Model must be fitted before making predictions")
-        X_poly = self.poly_features.transform(X)
-        return self.linear_model.predict(X_poly)
+        self.poly = PolynomialFeatures(degree=degree, include_bias=False)
+        self.model = LinearRegression()
+    def fit(self, X, y):
+        x_poly = self.poly.fit_transform(X)
+        self.model.fit(x_poly, y)
+    def predict(self, X):
+        x_poly = self.poly.transform(X)
+        return self.model.predict(x_poly)

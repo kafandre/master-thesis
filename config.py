@@ -1,17 +1,35 @@
 class config:
-    # Data generation parameters
-    data_amount = 500       # Number of data points to generate
-    SEED = 100              # Global random seed for reproducibility
-    data_seed = 425         # Seed specifically for data generation
-    train_split = 0.8       # Proportion of data to use for training
-    train_size = int(data_amount * train_split)
+    # --- Defaults (can be overridden by run_grid.py) ---
+    SEED = 100
+    n_seeds = 10  # Number of seeds per configuration
 
-    # Model parameters
-    n_estimators = 1000     # Number of estimators for the CWB model
-    learning_rate = 0.1     # Learning rate for the CWB model
-    eval_freq = 1           # Evaluation frequency (iterations)
-    batch_size = train_size # Batch size for training
-    batch_mode = "all"      # 'all' or 'first'
+    # Data
+    n_samples = 500
+    dim_mode = "low"     # 'low' (5), 'high' (50)
+    drift_type = "none"  # 'none', 'meaningful', 'noise'
+    drift_magnitude = "weak"
     
-    # Flooding parameters
-    flood_level = 90        # Flooding level for the flooding loss
+    # Model
+    n_estimators = 1000
+    learning_rate = 0.1
+    base_learner = "polynomial"
+    poly_degree = 2
+    
+    # Methods (Flags)
+    use_momentum = False
+    use_top_k = False
+    use_flooding = False
+    
+    # Hyperparameters
+    top_k = 5
+    momentum_decay = 0.9
+    momentum_strength = 1.0
+    
+    # Flooding: Multiplier of the true noise variance
+    # e.g., 0.5 means we flood at 0.5 * sigma^2
+    flood_level_sigma_multiplier = 0.0 
+    
+    # Splits
+    train_split = 0.7
+    val_split = 0.15
+    # test_split = remainder
