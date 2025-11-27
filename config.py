@@ -18,6 +18,11 @@ class config:
     top_k = 5
     momentum_decay = 0.9
     momentum_strength = 1.0
+
+    flood_level = 26
+
+    # Batch size for mini-batch processing
+    batch_size = None
     
     # Experiment Config
     n_estimators = 1000

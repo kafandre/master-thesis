@@ -16,7 +16,7 @@ class NoisyData(Dataset):
         if dim_mode == 'low':
             self.n_features = 5
         elif dim_mode == 'high':
-            self.n_features = 50
+            self.n_features = 20
         else:
             raise ValueError(f"Unknown dim_mode: {dim_mode}")
             
