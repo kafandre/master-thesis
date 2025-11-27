@@ -16,81 +16,81 @@ method_combinations = [
     ("All", True, True, True),
 ]
 
-dims = ["low", "high"]
-drifts = ["none", "meaningful", "noise"]
 flood_multipliers = [0.5, 1.0, 2.0]
 
-# We will separate summary data (CSV) from curve data (Pickle)
 summary_table = []
-all_curves = {} # Key: specific run ID, Value: history dict
+# all_curves = {} # Uncomment if you want to save curves (warning: large file)
 
 print("Starting Grid Search...")
-total_runs = len(method_combinations) * len(dims) * len(drifts) * config.n_seeds
-pbar = tqdm(total=total_runs)
+
+# Calculate total for progress bar
+# Methods * (BaseLearners * Dims * Sizes * Noises * Seeds)
+# Note: Flood loop is inside methods, so it's approx 15 method-variants
+# 15 * 3 * 2 * 2 * 2 * 10 = 3600
+pbar = tqdm(total=3600)
 
 run_id = 0
 
-for dim in dims:
-    for drift in drifts:
-        for method_name, use_mom, use_topk, use_flood in method_combinations:
-            
-            # If using flooding, test multiple levels; otherwise just run once (level 0)
-            current_flood_levels = flood_multipliers if use_flood else [0.0]
-            
-            for flood_mult in current_flood_levels:
-                for seed_offset in range(config.n_seeds):
-                    seed = config.SEED + seed_offset
-                    run_id += 1
+# --- The Big Loop ---
+for base_learner in config.base_learners:
+    for dim in config.dims:
+        for size in config.sizes:
+            for noise in config.noise_levels:
+                for method_name, use_mom, use_topk, use_flood in method_combinations:
                     
-                    try:
-                        res = run_experiment(
-                            seed=seed,
-                            drift_type=drift,
-                            drift_magnitude=config.drift_magnitude,
-                            dim_mode=dim,
-                            use_momentum=use_mom,
-                            use_top_k=use_topk,
-                            use_flooding=use_flood,
-                            flood_multiplier=flood_mult
-                        )
-                        
-                        # 1. Save Summary Data (for CSV Table)
-                        summary_row = {
-                            'run_id': run_id,
-                            'method_name': method_name,
-                            'drift': drift,
-                            'dim': dim,
-                            'seed': seed,
-                            'flood_mult': flood_mult,
-                            'last_test_mse': res['last_test_mse'],
-                            'best_test_mse': res['best_test_mse'],
-                            'best_iter': res['best_iter'],
-                            'final_train_mse': res['final_train_mse']
-                        }
-                        summary_table.append(summary_row)
-                        
-                        # 2. Save Curves (for Plotting later)
-                        # We save the whole history dict using a unique key
-                        all_curves[run_id] = res['history']
-                        
-                    except Exception as e:
-                        print(f"Error in run {run_id}: {e}")
-                        
-                    pbar.update(1)
+                    # Flooding Levels Logic
+                    current_flood_levels = flood_multipliers if use_flood else [0.0]
+                    
+                    for flood_mult in current_flood_levels:
+                        for seed_offset in range(config.n_seeds):
+                            seed = config.SEED + seed_offset
+                            run_id += 1
+                            
+                            try:
+                                res = run_experiment(
+                                    seed=seed,
+                                    dim_mode=dim,
+                                    n_samples=size,
+                                    noise_std=noise,
+                                    base_learner=base_learner,
+                                    use_momentum=use_mom,
+                                    use_top_k=use_topk,
+                                    use_flooding=use_flood,
+                                    flood_multiplier=flood_mult
+                                )
+                                
+                                # Unpack Results
+                                scores = res['scores']
+                                
+                                row = {
+                                    'run_id': run_id,
+                                    'seed': seed,
+                                    'base_learner': base_learner,
+                                    'dim': dim,
+                                    'n_samples': size,
+                                    'noise_std': noise,
+                                    'method': method_name,
+                                    'flood_mult': flood_mult,
+                                    'best_iter': res['best_iter'],
+                                    # The 5 Key Metrics
+                                    'mse_clean': scores['clean'],
+                                    'mse_mean_weak': scores['meaningful_weak'],
+                                    'mse_mean_strong': scores['meaningful_strong'],
+                                    'mse_noise_weak': scores['noise_weak'],
+                                    'mse_noise_strong': scores['noise_strong'],
+                                }
+                                summary_table.append(row)
+                                
+                                # all_curves[run_id] = res['history']
+                                
+                            except Exception as e:
+                                print(f"Error in run {run_id}: {e}")
+                                
+                            pbar.update(1)
 
 pbar.close()
 
-# --- Save Results ---
-# 1. Save Big Table to CSV
+# Save
 df = pd.DataFrame(summary_table)
 df.to_csv("grid_search_results.csv", index=False)
-print(f"\nSummary table saved to 'grid_search_results.csv'")
-
-# 2. Save Curves to Pickle
-with open("grid_search_curves.pkl", "wb") as f:
-    pickle.dump(all_curves, f)
-print(f"Loss curves saved to 'grid_search_curves.pkl'")
-
-# Quick Sanity Check
-print("\nFirst few rows of results:")
-print(df.head())
+print("Done! Results saved.")

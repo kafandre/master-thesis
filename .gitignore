@@ -16,4 +16,7 @@ flooding_model_checkpoints/
 # all log files
 *.log
 
-.DS_Store
+*.DS_Store
+
+saved_models/
+papers/

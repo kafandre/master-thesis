@@ -3,8 +3,8 @@ from torch.utils.data import Dataset
 import numpy as np
 
 class NoisyData(Dataset):
-    def __init__(self, n_samples=500, dim_mode='low', seed=None, 
-                 drift_type='none', drift_magnitude='weak'):
+    def __init__(self, n_samples=100, dim_mode='low', noise_std=1.0, 
+                 seed=None, drift_type='none', drift_magnitude='weak'):
         
         if seed is not None:
             torch.manual_seed(seed)
@@ -22,7 +22,7 @@ class NoisyData(Dataset):
             
         self.x = torch.randn(n_samples, self.n_features)
         
-        # --- Define Drift Parameters ---
+        # --- Drift Parameters ---
         self.coef_meaningful = 3.0
         self.coef_interaction = 2.0
         self.noise_mean = 0.0
@@ -52,15 +52,11 @@ class NoisyData(Dataset):
                   self.coef_meaningful * self.x[:, 2] +
                   self.coef_interaction * self.x[:, 0] * self.x[:, 1]) 
         
-        # Add pure noise (irreducible error)
-        # This is the "True Noise" we use to calibrate Flooding
-        epsilon = torch.randn(n_samples) * 1.0 
+        # Add Noise (controlled by noise_std now)
+        epsilon = torch.randn(n_samples) * noise_std
         
         self.y = signal + epsilon
-        
-        # Save true noise variance for Flooding calculation
-        self.true_noise_var = 1.0
-        
+        self.true_noise_var = noise_std ** 2 # For Flooding calculation
         self.len = self.n_samples
 
     def __getitem__(self, idx):
