@@ -2,11 +2,18 @@ class config:
     SEED = 100
     n_seeds = 10 
     
-    # --- Data Levels (2 of each) ---
-    dims = ["low", "high"]           # 5 vs 50 features
-    sizes = [100, 1000]              # Small vs Large sample size
-    noise_levels = [1.0, 3.0]        # Low vs High noise (Sigma)
+    # --- Dataset Configuration ---
+    # Options: "synthetic" or "real"
+    DATASET_TYPE = "real" 
     
+    # Options: "diabetes", "bodyfat", "riboflavin", "pcr" (Ignored if type is synthetic)
+    DATASET_NAME = "bodyfat"
+    
+    # --- Data Levels (Synthetic Only) ---
+    dims = ["low", "high"]           
+    sizes = [100, 1000]              
+    noise_levels = [1.0, 3.0]
+
     # --- Base Learners (3 types) ---
     base_learners = ["linear", "polynomial", "tree"]
     
@@ -19,7 +26,7 @@ class config:
     momentum_decay = 0.9
     momentum_strength = 1.0
 
-    flood_level = 26
+    flood_level = 0
 
     # Batch size for mini-batch processing
     batch_size = None

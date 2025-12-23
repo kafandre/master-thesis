@@ -2,6 +2,7 @@ import torch
 from torch.utils.data import random_split
 import numpy as np
 from data.NoisyData import NoisyData
+from data.RealData import RealData
 from models.ComponentwiseBoostingModel import ComponentwiseBoostingModel
 from config import config as default_config
 import matplotlib.pyplot as plt
@@ -19,13 +20,20 @@ def run_experiment(
     batch_size=None
 ):
     # --- 1. Train on CLEAN Data ---
-    dataset_clean = NoisyData(
-        n_samples=n_samples,
-        dim_mode=dim_mode,
-        noise_std=noise_std,
-        seed=seed,
-        drift_type='none'
-    )
+    if default_config.DATASET_TYPE == 'synthetic':
+        dataset_clean = NoisyData(
+            n_samples=n_samples,
+            dim_mode=dim_mode,
+            noise_std=noise_std,
+            seed=seed,
+            drift_type='none'
+        )
+    else:
+        # For Real Data
+        dataset_clean = RealData(
+            dataset_name=default_config.DATASET_NAME, 
+            seed=seed
+        )
     
     # Splits
     total_len = len(dataset_clean)
@@ -79,7 +87,7 @@ def run_experiment(
         X_test=X_test_clean,
         y_test=y_test_clean
         )
-    
+
     # --- 2. Evaluate (The 5 Scenarios) ---
     results = {}
     
@@ -92,29 +100,29 @@ def run_experiment(
     # A. Clean Test
     results['clean'] = get_mse(X_test_clean, y_test_clean)
     
-    # B. The 4 Drift Scenarios
-    scenarios = [
-        ('meaningful', 'weak'),
-        ('meaningful', 'strong'),
-        ('noise', 'weak'),
-        ('noise', 'strong')
-    ]
-    
-    for d_type, d_mag in scenarios:
-        # Re-gen universe with drift
-        ds_drift = NoisyData(
-            n_samples=n_samples,
-            dim_mode=dim_mode,
-            noise_std=noise_std,
-            seed=seed,
-            drift_type=d_type,
-            drift_magnitude=d_mag
-        )
-        # Use SAME test indices
-        X_test_drift = ds_drift.x[test_idx]
-        y_test_drift = ds_drift.y[test_idx]
+    # B. Drift Scenarios (Synthetic Only)
+    if default_config.DATASET_TYPE == 'synthetic':
+        scenarios = [
+            ('meaningful', 'weak'),
+            ('meaningful', 'strong'),
+            ('noise', 'weak'),
+            ('noise', 'strong')
+        ]
         
-        results[f"{d_type}_{d_mag}"] = get_mse(X_test_drift, y_test_drift)
+        for d_type, d_mag in scenarios:
+            ds_drift = NoisyData(
+                n_samples=n_samples,
+                dim_mode=dim_mode,
+                noise_std=noise_std,
+                seed=seed,
+                drift_type=d_type,
+                drift_magnitude=d_mag
+            )
+            # Use SAME test indices
+            X_test_drift = ds_drift.x[test_idx]
+            y_test_drift = ds_drift.y[test_idx]
+            
+            results[f"{d_type}_{d_mag}"] = get_mse(X_test_drift, y_test_drift)
         
     return {
         'model_obj': model, # Optional: return if you want to save
