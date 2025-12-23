@@ -56,7 +56,8 @@ for base_learner in config.base_learners:
                                     use_momentum=use_mom,
                                     use_top_k=use_topk,
                                     use_flooding=use_flood,
-                                    flood_multiplier=flood_mult
+                                    flood_multiplier=flood_mult,
+                                    batch_size=config.batch_size
                                 )
                                 
                                 # Unpack Results

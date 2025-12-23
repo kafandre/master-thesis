@@ -12,6 +12,7 @@ class ComponentwiseBoostingModel:
         learning_rate: float = 0.1,
         base_learner: str = "polynomial",
         poly_degree: int = 2,
+        tree_max_depth: int = 2,
         loss: str = 'mse', # 'mse' or 'flooding'
         flood_level: float = 0.0,
         use_momentum: bool = False,
@@ -19,12 +20,14 @@ class ComponentwiseBoostingModel:
         top_k: int = 5,
         momentum_decay: float = 0.9,
         momentum_strength: float = 1.0,
+        batch_size: Optional[int] = None,
         random_state: Optional[int] = None
     ):
         self.n_estimators = n_estimators
         self.learning_rate = learning_rate
         self.base_learner = base_learner
         self.poly_degree = poly_degree
+        self.tree_max_depth = tree_max_depth
         self.loss = loss
         self.flood_level = flood_level
         
@@ -33,6 +36,7 @@ class ComponentwiseBoostingModel:
         self.top_k = top_k
         self.momentum_decay = momentum_decay
         self.momentum_strength = momentum_strength
+        self.batch_size = batch_size
         
         self.random_state = random_state
         if random_state is not None:
@@ -106,32 +110,50 @@ class ComponentwiseBoostingModel:
         if X_test is not None:
             curr_pred_test = torch.full_like(y_test, self.intercept_)
 
+        n_samples = X_train.shape[0]
         n_features = X_train.shape[1]
         
         # Best Model Tracking
         best_val_loss = float('inf')
         self.best_iteration_ = 0
 
-        for i in range(self.n_estimators):
-            grad = self._get_gradient(curr_pred_train, y_train)
-            target = -grad 
-
-            feature_losses = []
-            feature_models = []
-            
+        for i in range(self.n_estimators):        
             # Evaluate all features
             for f_idx in range(n_features):
-                x_f = X_train[:, f_idx:f_idx+1]
-                model = self._create_base_learner()
-                model = self._fit_base_learner(model, x_f, target)
-                
-                # Calculate loss against gradient
-                pred = self._predict_base_learner(model, x_f).squeeze()
-                loss = torch.mean((pred - target.squeeze())**2)
-                
-                feature_losses.append(loss)
-                feature_models.append(model)
-            
+                # Mini-batch sampling
+                if self.batch_size is not None and self.batch_size < n_samples:
+                    # Randomly sample indices for this iteration
+                    batch_idx = np.random.choice(n_samples, self.batch_size, replace=False)   
+                    # creating batch views
+                    X_batch = X_train[batch_idx]
+                    y_batch = y_train[batch_idx]
+                    curr_pred_batch = curr_pred_train[batch_idx]
+
+                else:
+                    #Fallback to full batch
+                    X_batch = X_train
+                    y_batch = y_train
+                    curr_pred_batch = curr_pred_train
+
+                grad = self._get_gradient(curr_pred_batch, y_batch)
+                target = -grad
+
+                feature_losses = []
+                feature_models = []
+
+                # Evaluate all features using BATCH data
+                for f_idx in range(n_features):
+                    x_f = X_batch[:, f_idx:f_idx+1] # Slice batch feature
+                    model = self._create_base_learner()
+                    model = self._fit_base_learner(model, x_f, target)
+                    
+                    # Calculate loss against batch gradient
+                    pred = self._predict_base_learner(model, x_f).squeeze()
+                    loss = torch.mean((pred - target.squeeze())**2)
+                    
+                    feature_losses.append(loss)
+                    feature_models.append(model)
+
             # Select Best Feature
             best_idx = self._select_feature(torch.tensor(feature_losses))
             best_model = feature_models[best_idx]
@@ -140,10 +162,10 @@ class ComponentwiseBoostingModel:
             self.estimators_.append((best_idx, best_model))
             self.history['selected_features'].append(best_idx)
             
-            # Update Predictions
-            # Train
-            x_f_train = X_train[:, best_idx:best_idx+1]
-            update = self._predict_base_learner(best_model, x_f_train).squeeze() * self.learning_rate
+            # Global Update on FULL SET
+            # predict on the FULL X_train to keep residuals correct for next iteration
+            x_f_train_full = X_train[:, best_idx:best_idx+1]
+            update = self._predict_base_learner(best_model, x_f_train_full).squeeze() * self.learning_rate
             curr_pred_train += update
             
             # Val
@@ -168,15 +190,21 @@ class ComponentwiseBoostingModel:
                 self.history['test_loss'].append(test_mse)
 
             # Train Loss
-            # Note: For history we log MSE to be comparable, even if we optimize Flooding
+            # Log Full Training Loss (to observe Double Descent properly)
+            # For history we log MSE to be comparable, even if we optimize with Flooding
             train_mse = torch.mean((curr_pred_train - y_train)**2).item()
             self.history['train_loss'].append(train_mse)
+
+            # Print iteration, train MSE & test MSE
+            print(f"Iter {i+1}/{self.n_estimators} | Train MSE: {train_mse:.5f} | Test MSE: {self.history['test_loss'][-1] if len(self.history['test_loss']) > i else 'N/A'}")
 
     def _create_base_learner(self):
         if self.base_learner == "linear":
             return torch.nn.Linear(1, 1, bias=False)
         elif self.base_learner == "polynomial":
             return PolynomialRegressionWrapper(degree=self.poly_degree)
+        elif self.base_learner == "tree":
+            return DecisionTreeRegressor(max_depth=self.tree_max_depth)
 
     def _fit_base_learner(self, model, X, y):
         if self.base_learner == "linear":
