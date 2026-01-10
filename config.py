@@ -4,13 +4,13 @@ class config:
     
     # --- Dataset Configuration ---
     # Options: "synthetic" or "real"
-    DATASET_TYPE = "real" 
+    DATASET_TYPE = "synthetic" 
     
     # Options: "diabetes", "bodyfat", "riboflavin", "pcr" (Ignored if type is synthetic)
-    DATASET_NAME = "bodyfat"
+    DATASET_NAME = "riboflavin"
     
     # --- Data Levels (Synthetic Only) ---
-    dims = ["low", "high"]           
+    dims = [5, 20]           
     sizes = [100, 1000]              
     noise_levels = [1.0, 3.0]
 
@@ -24,9 +24,9 @@ class config:
     # Fixed Method Params
     top_k = 5
     momentum_decay = 0.9
-    momentum_strength = 1.0
+    momentum_strength = 5.0
 
-    flood_level = 0
+    flood_level = None
 
     # Batch size for mini-batch processing
     batch_size = None
@@ -36,3 +36,26 @@ class config:
     learning_rate = 0.1
     train_split = 0.7
     val_split = 0.15
+
+    # --- Evaluation Configuration ---
+    # Scenarios for drift evaluation (Type, Magnitude)
+    drift_scenarios = [
+        ('meaningful', 'weak'),
+        ('meaningful', 'strong'),
+        ('noise', 'weak'),
+        ('noise', 'strong')
+    ]
+
+    # --- Model Stability (Epsilons) ---
+    eps_momentum = 1e-6
+    eps_linear = 1e-8
+
+    # --- Demo / Single Run Configuration (for train.py __main__) ---
+    demo_seed = 100
+    demo_dim_mode = 20
+    demo_n_samples = 200
+    demo_noise_std = 5.0
+    demo_base_learner = "linear"
+    demo_flood_multiplier = 1.0
+    demo_batch_size = 100
+    demo_use_flooding = False

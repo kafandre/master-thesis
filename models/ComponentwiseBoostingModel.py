@@ -21,7 +21,9 @@ class ComponentwiseBoostingModel:
         momentum_decay: float = 0.9,
         momentum_strength: float = 1.0,
         batch_size: Optional[int] = None,
-        random_state: Optional[int] = None
+        random_state: Optional[int] = None,
+        eps_momentum: float = 1e-6,
+        eps_linear: float = 1e-8
     ):
         self.n_estimators = n_estimators
         self.learning_rate = learning_rate
@@ -42,7 +44,10 @@ class ComponentwiseBoostingModel:
         if random_state is not None:
             torch.manual_seed(random_state)
             np.random.seed(random_state)
-            
+
+        self.eps_momentum = eps_momentum
+        self.eps_linear = eps_linear   
+        
         self.estimators_ = []
         self.intercept_ = 0.0
         self.feature_momentum = {} 
@@ -76,7 +81,7 @@ class ComponentwiseBoostingModel:
             # Update Momentum: Inversely proportional to loss
             for i in range(n_features):
                 self.feature_momentum[i] *= self.momentum_decay
-                score = 1.0 / (losses_tensor[i].item() + 1e-6)
+                score = 1.0 / (losses_tensor[i].item() + self.eps_momentum)
                 self.feature_momentum[i] += self.momentum_strength * score
                 
             # Higher momentum -> Lower Adjusted Loss (Better chance to be picked)
@@ -210,7 +215,7 @@ class ComponentwiseBoostingModel:
         if self.base_learner == "linear":
             xtx = torch.matmul(X.t(), X)
             xty = torch.matmul(X.t(), y.unsqueeze(1) if y.dim()==1 else y)
-            beta = xty / (xtx + 1e-8)
+            beta = xty / (xtx + self.eps_linear)
             model.weight.data = beta.t()
             return model
         else:

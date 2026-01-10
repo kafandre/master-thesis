@@ -3,8 +3,8 @@ from torch.utils.data import Dataset
 import numpy as np
 
 class NoisyData(Dataset):
-    def __init__(self, n_samples=100, dim_mode='low', noise_std=1.0, 
-                 seed=None, drift_type='none', drift_magnitude='weak'):
+    def __init__(self, n_samples=100, dim_mode=5, noise_std=1.0,
+                seed=None, drift_type='none', drift_magnitude='weak'):
         
         if seed is not None:
             torch.manual_seed(seed)
@@ -13,12 +13,14 @@ class NoisyData(Dataset):
         self.n_samples = n_samples
         
         # Dimensions
-        if dim_mode == 'low':
-            self.n_features = 5
-        elif dim_mode == 'high':
-            self.n_features = 20
-        else:
-            raise ValueError(f"Unknown dim_mode: {dim_mode}")
+        # if dim_mode == 'low':
+        #     self.n_features = 5
+        # elif dim_mode == 'high':
+        #     self.n_features = 25
+        # else:
+        #     raise ValueError(f"Unknown dim_mode: {dim_mode}")
+        
+        self.n_features = dim_mode
             
         self.x = torch.randn(n_samples, self.n_features)
         

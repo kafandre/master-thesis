@@ -41,7 +41,8 @@ class RealData(Dataset):
             y_path = os.path.join(root_dir, 'pcr', 'Y3.txt')
             
             # Use 'sep=r"\s+"' to handle variable whitespace
-            X_raw = pd.read_csv(x_path, sep=r'\s+', header=None).values
+            # added .T since the input matrix is stored transposed
+            X_raw = pd.read_csv(x_path, sep=r'\s+', header=None).T.values
             y_raw = pd.read_csv(y_path, sep=r'\s+', header=None).values.flatten()
 
         else:
