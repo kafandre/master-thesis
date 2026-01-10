@@ -20,6 +20,7 @@ flooding_model_checkpoints/
 
 saved_models/
 papers/
+results/
 
 *.csv
 *.txt

@@ -17,7 +17,9 @@ def run_experiment(
     use_top_k,
     use_flooding,
     flood_multiplier,
-    batch_size=None
+    batch_size=None,
+    forced_flood_level=None,
+    specific_top_k=None
 ):
     # --- 1. Train on CLEAN Data ---
     if default_config.DATASET_TYPE == 'synthetic':
@@ -56,12 +58,18 @@ def run_experiment(
     X_test_clean = dataset_clean.x[test_idx]
     y_test_clean = dataset_clean.y[test_idx]
     
-    # Determine Flood Level
-    if default_config.flood_level is None:
+    # --- Determine Flood Level ---
+    # Prioritize forced_flood_level if provided
+    if forced_flood_level is not None:
+        flood_level = forced_flood_level
+    elif default_config.flood_level is None:
         flood_level = dataset_clean.true_noise_var * flood_multiplier
     else:
         flood_level = default_config.flood_level
     
+    # deteremine top-k
+    current_top_k = specific_top_k if specific_top_k is not None else default_config.top_k
+
     # Init Model
     model = ComponentwiseBoostingModel(
         n_estimators=default_config.n_estimators,
@@ -73,7 +81,7 @@ def run_experiment(
         flood_level=flood_level,
         use_momentum=use_momentum,
         use_top_k=use_top_k,
-        top_k=default_config.top_k,
+        top_k=current_top_k,
         momentum_decay=default_config.momentum_decay,
         momentum_strength=default_config.momentum_strength,
         batch_size=batch_size,
@@ -123,7 +131,7 @@ def run_experiment(
             results[f"{d_type}_{d_mag}"] = get_mse(X_test_drift, y_test_drift)
         
     return {
-        'model_obj': model, # Optional: return if you want to save
+        'model_obj': model, 
         'best_iter': model.best_iteration_,
         'scores': results,
         'history': model.history,
