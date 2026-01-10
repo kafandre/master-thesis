@@ -143,7 +143,10 @@ if __name__ == "__main__":
         {"name": "Vanilla",             "mom": False, "topk": False, "batch": None},
         {"name": "Top-K Only",          "mom": False, "topk": True,  "batch": None},
         {"name": "Momentum Only",       "mom": True,  "topk": False, "batch": None},
+        {"name": "Top-K + Momentum",    "mom": True,  "topk": True, "batch": None},
         {"name": "Mini-Batch Only",     "mom": False, "topk": False, "batch": default_config.demo_batch_size},
+        {"name": "Mini-Batch + Top-K",  "mom": False, "topk": True, "batch": default_config.demo_batch_size},
+        {"name": "Mini-Batch + Momentum","mom": True, "topk": False, "batch": default_config.demo_batch_size},
         {"name": "Combined (All 3)",    "mom": True,  "topk": True,  "batch": default_config.demo_batch_size},
     ]
 
