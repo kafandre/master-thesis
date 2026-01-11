@@ -54,28 +54,23 @@ sys.stdout = Logger(log_file_path)
 sys.stderr = sys.stdout
 
 # --- Configuration Generation ---
-# 1. Base Methods
-base_methods = [
-    {"name": "Vanilla",  "mom": False, "topk": False},
-    {"name": "Momentum", "mom": True,  "topk": False},
-    {"name": "TopK",     "mom": False, "topk": True},
-    {"name": "All",      "mom": True,  "topk": True},
-]
-
-# 2. Add Batch variants
-method_configs = []
-
-for m in base_methods:
-    # No Batch
-    c = m.copy()
-    c['batch'] = None
-    method_configs.append(c)
+method_configs = [
+    # 1. Single Mechanics (or None)
+    {"name": "Vanilla",             "mom": False, "topk": False, "batch": None},
+    {"name": "TopK",                "mom": False, "topk": True,  "batch": None},
+    {"name": "Momentum",            "mom": True,  "topk": False, "batch": None},
     
-    # With Batch
-    c_batch = m.copy()
-    c_batch['name'] = f"MiniBatch {c_batch['name']}"
-    c_batch['batch'] = "half_train"
-    method_configs.append(c_batch)
+    # 2. Pure Minibatch
+    {"name": "Minibatch",           "mom": False, "topk": False, "batch": "half_train"},
+    
+    # 3. Double Combinations
+    {"name": "TopK+Momentum",       "mom": True,  "topk": True,  "batch": None},
+    {"name": "TopK+Minibatch",      "mom": False, "topk": True,  "batch": "half_train"},
+    {"name": "Momentum+Minibatch",  "mom": True,  "topk": False, "batch": "half_train"},
+    
+    # 4. All Three
+    {"name": "All",                 "mom": True,  "topk": True,  "batch": "half_train"},
+]
 
 # --- Helper Functions ---
 
