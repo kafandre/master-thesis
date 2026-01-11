@@ -1,11 +1,15 @@
 import pandas as pd
 import pickle
 import os
+import matplotlib
+matplotlib.use('Agg')  # Force non-interactive backend
 import matplotlib.pyplot as plt
 import numpy as np
 from tqdm import tqdm
 from train import run_experiment
 from config import config
+import sys
+import datetime
 
 # --- Setup Directories ---
 RESULTS_DIR = "results"
@@ -15,6 +19,39 @@ SUMMARY_FILE = os.path.join(RESULTS_DIR, "grid_summary.csv")
 
 os.makedirs(HISTORY_DIR, exist_ok=True)
 os.makedirs(PLOTS_DIR, exist_ok=True)
+
+class Logger(object):
+    def __init__(self, filename):
+        self.terminal = sys.stdout
+        self.log = open(filename, "a")
+
+    def write(self, message):
+        # Write to console (terminal) as is
+        self.terminal.write(message)
+        
+        # Write to file with timestamp
+        # Filter out carriage returns (\r) to avoid logging progress bar updates
+        if "\r" not in message:
+            if message.strip(): # If message has content
+                timestamp = datetime.datetime.now().strftime("[%Y-%m-%d %H:%M:%S] ")
+                self.log.write(f"{timestamp}{message}")
+            else:
+                # Keep newlines for formatting
+                self.log.write(message)
+                
+        self.log.flush()
+
+    def flush(self):
+        self.terminal.flush()
+        self.log.flush()
+
+    def isatty(self):
+        return self.terminal.isatty()
+
+# Redirect stdout and stderr to the log file
+log_file_path = os.path.join(RESULTS_DIR, "grid_log.txt")
+sys.stdout = Logger(log_file_path)
+sys.stderr = sys.stdout
 
 # --- Configuration Generation ---
 # 1. Base Methods
@@ -153,6 +190,8 @@ for base_learner in config.base_learners:
                             batch_val = int(train_len / 2)             # Set to half (2 batches)
                         else:
                             batch_val = method_conf['batch']
+                            if batch_val is not None:
+                                batch_val = int(batch_val)
 
                         # --- 2. Dynamic Top-K Logic ---
                         # Use 3 for dim=5, otherwise 5
@@ -210,7 +249,7 @@ for base_learner in config.base_learners:
                                     use_top_k=method_conf['topk'],
                                     use_flooding=False,
                                     flood_multiplier=0.0, # Irrelevant
-                                    batch_size=method_conf['batch'],
+                                    batch_size=batch_val,
                                     forced_flood_level=None,
                                     specific_top_k=actual_k
                                 )
@@ -278,7 +317,7 @@ for base_learner in config.base_learners:
                                         use_top_k=method_conf['topk'],
                                         use_flooding=True,
                                         flood_multiplier=0.0, # Ignored due to forced level
-                                        batch_size=method_conf['batch'],
+                                        batch_size=batch_val,
                                         forced_flood_level=target_flood_level,
                                         specific_top_k=actual_k
                                     )

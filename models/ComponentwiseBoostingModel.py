@@ -38,7 +38,7 @@ class ComponentwiseBoostingModel:
         self.top_k = top_k
         self.momentum_decay = momentum_decay
         self.momentum_strength = momentum_strength
-        self.batch_size = batch_size
+        self.batch_size = int(batch_size) if batch_size is not None else None
         
         self.random_state = random_state
         if random_state is not None:
