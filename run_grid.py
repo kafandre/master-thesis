@@ -10,6 +10,9 @@ from train import run_experiment
 from config import config
 import sys
 import datetime
+import random 
+from joblib import Parallel, delayed 
+from filelock import FileLock 
 
 # --- Setup Directories ---
 RESULTS_DIR = "results"
@@ -49,6 +52,8 @@ class Logger(object):
         return self.terminal.isatty()
 
 # Redirect stdout and stderr to the log file
+# Note: In parallel execution, this mostly captures the main process. 
+# Worker logs might be interleaved or captured by joblib.
 log_file_path = os.path.join(RESULTS_DIR, "grid_log.txt")
 sys.stdout = Logger(log_file_path)
 sys.stderr = sys.stdout
@@ -110,6 +115,7 @@ def get_filename_base(params, flood_level_val=None):
     return name
 
 def save_plot(history, flood_level, params, filename_base):
+    # Create a new figure for every plot to ensure thread safety
     plt.figure(figsize=(10, 6))
     
     if 'train_loss' in history:
@@ -138,212 +144,207 @@ def save_results_to_csv(row_dict):
     hdr = not os.path.exists(SUMMARY_FILE)
     df.to_csv(SUMMARY_FILE, mode='a', header=hdr, index=False)
 
-def check_if_done(signature):
-    if not os.path.exists(SUMMARY_FILE):
-        return False
-    # This is a bit slow for massive files, but safe. 
-    # For speed, we could load the existing signatures into memory once at startup.
-    try:
-        df = pd.read_csv(SUMMARY_FILE)
-        if 'signature' not in df.columns: return False
-        return signature in df['signature'].values
-    except:
-        return False
+def run_single_wrapper(params):
+    """
+    Worker function that handles ONE parameter combination (Clean + Flooding).
+    It checks if the run exists (resume logic) and only runs if missing.
+    """
+    # initialize lock inside the worker
+    lock_path = os.path.join(RESULTS_DIR, "grid_summary.csv.lock")
+    local_csv_lock = FileLock(lock_path)
 
-# --- Load completed runs for fast checking ---
-finished_signatures = set()
-if os.path.exists(SUMMARY_FILE):
-    try:
-        df = pd.read_csv(SUMMARY_FILE)
-        if 'signature' in df.columns:
-            finished_signatures = set(df['signature'].values)
-    except Exception as e:
-        print(f"Warning: Could not read existing summary file: {e}")
+    # Re-calculate batch size locally (since it was passed as int in params)
+    batch_val = params['batch']
+    
+    # --- 1. CLEAN RUN SETUP ---
+    clean_params = params.copy()
+    clean_params['use_flooding'] = False
+    
+    clean_fname = get_filename_base(clean_params)
+    clean_hist_path = os.path.join(HISTORY_DIR, f"Hist_{clean_fname}.pkl")
+    
+    clean_history = None
+    min_train_loss = None
+    
+    # RESUME LOGIC: Check if the pickle file already exists
+    # If it exists, we load it instead of re-training (Fast Skip)
+    if os.path.exists(clean_hist_path):
+        try:
+            with open(clean_hist_path, 'rb') as f:
+                clean_history = pickle.load(f)
+            min_train_loss = min(clean_history['train_loss'])
+        except Exception as e:
+            # If the file is corrupt, we force a re-run
+            print(f"Warning: Corrupt history file {clean_fname}, re-running. Error: {e}")
+            clean_history = None 
+            
+    # EXECUTION: If not found (or corrupt), RUN IT
+    if clean_history is None:
+        try:
+            res_clean = run_experiment(
+                seed=params['seed'],
+                dim_mode=params['dim'],
+                n_samples=params['n_samples'],
+                noise_std=params['noise_std'],
+                base_learner=params['base_learner'],
+                use_momentum=params['mom'],
+                use_top_k=params['topk'],
+                use_flooding=False,
+                flood_multiplier=0.0,
+                batch_size=batch_val,
+                forced_flood_level=None,
+                specific_top_k=params['top_k_int']
+            )
+            clean_history = res_clean['history']
+            min_train_loss = min(clean_history['train_loss'])
+            
+            # Save History
+            with open(clean_hist_path, 'wb') as f:
+                pickle.dump(clean_history, f)
+                
+            # Save Plot
+            save_plot(clean_history, 0.0, clean_params, clean_fname)
+            
+            # Save to CSV (Protected by Lock)
+            row = clean_params.copy()
+            row.update({
+                'signature': get_run_signature(clean_params),
+                'flood_level': 0.0,
+                'best_iter': res_clean['best_iter'],
+                'mse_clean': res_clean['scores']['clean'],
+                'val_best': res_clean['scores']['val_best'],
+            })
+            for k, v in res_clean['scores'].items():
+                if k not in ['clean', 'val_best']:
+                    row[f"mse_{k}"] = v
+            
+            with local_csv_lock:
+                save_results_to_csv(row)
+                
+        except Exception as e:
+            # Catching errors so one bad run doesn't kill the whole parallel process
+            print(f"Error in CLEAN run {clean_fname}: {e}")
+            return # Cannot proceed to flooding if clean failed
 
-# --- Main Grid Loop ---
+    # --- 2. FLOODING RUN SETUP ---
+    # Only run flooding if method is not "Vanilla" (and if Clean run succeeded)
+    if params['name'] != "Vanilla" and min_train_loss is not None:
+        
+        target_flood_level = min_train_loss * 1.05
+        
+        flood_params = params.copy()
+        flood_params['use_flooding'] = True
+        
+        flood_fname = get_filename_base(flood_params, target_flood_level)
+        flood_hist_path = os.path.join(HISTORY_DIR, f"Hist_{flood_fname}.pkl")
+        
+        # RESUME LOGIC: Check if flood pickle exists
+        if not os.path.exists(flood_hist_path):
+            try:
+                res_flood = run_experiment(
+                    seed=params['seed'],
+                    dim_mode=params['dim'],
+                    n_samples=params['n_samples'],
+                    noise_std=params['noise_std'],
+                    base_learner=params['base_learner'],
+                    use_momentum=params['mom'],
+                    use_top_k=params['topk'],
+                    use_flooding=True,
+                    flood_multiplier=0.0, 
+                    batch_size=batch_val,
+                    forced_flood_level=target_flood_level,
+                    specific_top_k=params['top_k_int']
+                )
+                
+                # Save History
+                with open(flood_hist_path, 'wb') as f:
+                    pickle.dump(res_flood['history'], f)
+                    
+                # Save Plot
+                save_plot(res_flood['history'], target_flood_level, flood_params, flood_fname)
+                
+                # Save to CSV (Protected by Lock)
+                row = flood_params.copy()
+                row.update({
+                    'signature': get_run_signature(flood_params),
+                    'flood_level': target_flood_level,
+                    'best_iter': res_flood['best_iter'],
+                    'mse_clean': res_flood['scores']['clean'],
+                    'val_best': res_flood['scores']['val_best'],
+                })
+                for k, v in res_flood['scores'].items():
+                    if k not in ['clean', 'val_best']:
+                        row[f"mse_{k}"] = v
+                
+                with csv_lock:
+                    save_results_to_csv(row)
+                    
+            except Exception as e:
+                print(f"Error in FLOOD run {flood_fname}: {e}")
 
-total_iterations = (
-    len(config.base_learners) * len(config.dims) * len(config.sizes) * len(config.noise_levels) * len(method_configs) * config.n_seeds
-)
+# --- Main Grid Setup ---
+if __name__ == "__main__":
 
-print(f"Starting Grid Search. Total Combinations (Clean runs): {total_iterations}")
-print(f"Flooding runs will be triggered automatically where applicable.")
+    total_iterations_est = (
+        len(config.base_learners) * len(config.dims) * len(config.sizes) * len(config.noise_levels) * len(method_configs) * config.n_seeds
+    )
 
-pbar = tqdm(total=total_iterations)
+    print(f"Preparing Parallel Grid Search. Approx Combinations: {total_iterations_est}")
+    print(f"Resuming is supported: Existing 'Hist_*.pkl' files will be skipped.")
 
-for base_learner in config.base_learners:
-    for dim in config.dims:
-        for size in config.sizes:
-            for noise in config.noise_levels:
-                for method_conf in method_configs:
-                    for seed_offset in range(config.n_seeds):
-                        seed = config.SEED + seed_offset
-                        
-                        # --- Calculate Dynamic Batch Size ---
-                        if method_conf['batch'] == "half_train":
-                            train_len = int(size * config.train_split) # calculate train set size
-                            batch_val = int(train_len / 2)             # Set to half (2 batches)
-                        else:
-                            batch_val = method_conf['batch']
-                            if batch_val is not None:
-                                batch_val = int(batch_val)
-
-                        # --- 2. Dynamic Top-K Logic ---
-                        # Use 3 for dim=5, otherwise 5
-                        actual_k = 3 if dim == 5 else 5
-
-                        # Shared Parameters
-                        current_params = {
-                            'base_learner': base_learner,
-                            'dim': dim,
-                            'n_samples': size,
-                            'noise_std': noise,
-                            'seed': seed,
-                            'method': method_conf['name'],
-                            'mom': method_conf['mom'],
-                            'topk': method_conf['topk'],
-                            'batch': batch_val,
-                            'top_k_int': actual_k,
-                            'use_flooding': False
-                        }
-
-                        # --- 1. RUN CLEAN (Flooding=False) ---
-                        clean_sig = get_run_signature(current_params)
-                        
-                        # Placeholders for results to pass to flooding run
-                        min_train_loss = None
-                        run_clean_performed = False
-
-                        if clean_sig in finished_signatures:
-                            # If we skip, we need to retrieve the min_train_loss if we want to run the flooding counterpart
-                            # However, for simplicity and safety, if the Clean run is done but Flooding isn't, 
-                            # we might need to re-calculate min loss. 
-                            # To avoid complexity, we only skip if the Clean run is logged. 
-                            # If we need min_train_loss for the next step, we might need to re-run or load history.
-                            # Strategy: If Clean is done, try to load its history to find min_train_loss.
-                            try:
-                                # Construct filename to load history
-                                fname_base = get_filename_base(current_params)
-                                hist_path = os.path.join(HISTORY_DIR, f"Hist_{fname_base}.pkl")
-                                with open(hist_path, 'rb') as f:
-                                    h = pickle.load(f)
-                                min_train_loss = min(h['train_loss'])
-                            except:
-                                # If history missing, force re-run
-                                pass
-                        
-                        if min_train_loss is None:
-                            try:
-                                res_clean = run_experiment(
-                                    seed=seed,
-                                    dim_mode=dim,
-                                    n_samples=size,
-                                    noise_std=noise,
-                                    base_learner=base_learner,
-                                    use_momentum=method_conf['mom'],
-                                    use_top_k=method_conf['topk'],
-                                    use_flooding=False,
-                                    flood_multiplier=0.0, # Irrelevant
-                                    batch_size=batch_val,
-                                    forced_flood_level=None,
-                                    specific_top_k=actual_k
-                                )
-                                
-                                min_train_loss = min(res_clean['history']['train_loss'])
-                                run_clean_performed = True
-                                
-                                # Save Clean Results
-                                fname_base = get_filename_base(current_params)
-                                
-                                # 1. History
-                                with open(os.path.join(HISTORY_DIR, f"Hist_{fname_base}.pkl"), 'wb') as f:
-                                    pickle.dump(res_clean['history'], f)
-                                    
-                                # 2. Plot
-                                save_plot(res_clean['history'], 0.0, current_params, fname_base)
-                                
-                                # 3. CSV Summary
-                                row = current_params.copy()
-                                row.update({
-                                    'signature': clean_sig,
-                                    'flood_level': 0.0,
-                                    'best_iter': res_clean['best_iter'],
-                                    'mse_clean': res_clean['scores']['clean'],
-                                    'val_best': res_clean['scores']['val_best'],
-                                })
-                                # Add Drift scores
-                                for k, v in res_clean['scores'].items():
-                                    if k not in ['clean', 'val_best']:
-                                        row[f"mse_{k}"] = v
-                                        
-                                save_results_to_csv(row)
-                                finished_signatures.add(clean_sig)
-
-                            except Exception as e:
-                                print(f"\nError in CLEAN run {clean_sig}: {e}")
-                                min_train_loss = None # Cannot proceed to flooding
-
-                        
-                        # --- 2. RUN FLOODING (Twin Run) ---
-                        # Logic: Use min_train_loss * 1.05
-                        # Exclusion: Do not run flooding if method is exactly "Vanilla" (No batch)
-                        # "MiniBatch Vanilla" IS allowed.
-                        
-                        should_run_flood = (method_conf['name'] != "Vanilla")
-                        
-                        if should_run_flood and min_train_loss is not None:
+    # 1. Generate ALL combinations into a list first
+    # This replaces the nested loops so we can pass them to the parallel workers
+    all_jobs = []
+    
+    for base_learner in config.base_learners:
+        for dim in config.dims:
+            for size in config.sizes:
+                for noise in config.noise_levels:
+                    for method_conf in method_configs:
+                        for seed_offset in range(config.n_seeds):
+                            seed = config.SEED + seed_offset
                             
-                            # Update params for Flooding
-                            flood_params = current_params.copy()
-                            flood_params['use_flooding'] = True
-                            target_flood_level = min_train_loss * 1.05
-                            
-                            flood_sig = get_run_signature(flood_params)
-                            
-                            if flood_sig not in finished_signatures:
-                                try:
-                                    res_flood = run_experiment(
-                                        seed=seed,
-                                        dim_mode=dim,
-                                        n_samples=size,
-                                        noise_std=noise,
-                                        base_learner=base_learner,
-                                        use_momentum=method_conf['mom'],
-                                        use_top_k=method_conf['topk'],
-                                        use_flooding=True,
-                                        flood_multiplier=0.0, # Ignored due to forced level
-                                        batch_size=batch_val,
-                                        forced_flood_level=target_flood_level,
-                                        specific_top_k=actual_k
-                                    )
-                                    
-                                    # Save Flood Results
-                                    fname_base = get_filename_base(flood_params, target_flood_level)
-                                    
-                                    with open(os.path.join(HISTORY_DIR, f"Hist_{fname_base}.pkl"), 'wb') as f:
-                                        pickle.dump(res_flood['history'], f)
-                                        
-                                    save_plot(res_flood['history'], target_flood_level, flood_params, fname_base)
-                                    
-                                    row = flood_params.copy()
-                                    row.update({
-                                        'signature': flood_sig,
-                                        'flood_level': target_flood_level,
-                                        'best_iter': res_flood['best_iter'],
-                                        'mse_clean': res_flood['scores']['clean'],
-                                        'val_best': res_flood['scores']['val_best'],
-                                    })
-                                    for k, v in res_flood['scores'].items():
-                                        if k not in ['clean', 'val_best']:
-                                            row[f"mse_{k}"] = v
-                                            
-                                    save_results_to_csv(row)
-                                    finished_signatures.add(flood_sig)
-                                    
-                                except Exception as e:
-                                    print(f"\nError in FLOOD run {flood_sig}: {e}")
+                            # --- Calculate Dynamic Batch Size ---
+                            if method_conf['batch'] == "half_train":
+                                train_len = int(size * config.train_split) 
+                                batch_val = int(train_len / 2)             
+                            else:
+                                batch_val = method_conf['batch']
+                                if batch_val is not None:
+                                    batch_val = int(batch_val)
 
-                        pbar.update(1)
+                            # --- Dynamic Top-K Logic ---
+                            actual_k = 3 if dim == 5 else 5
 
-pbar.close()
-print("Grid Search Complete.")
+                            # Pack everything into a dictionary to send to the worker
+                            params = {
+                                'base_learner': base_learner,
+                                'dim': dim,
+                                'n_samples': size,
+                                'noise_std': noise,
+                                'seed': seed,
+                                'method': method_conf['name'],
+                                'name': method_conf['name'], # helper
+                                'mom': method_conf['mom'],
+                                'topk': method_conf['topk'],
+                                'batch': batch_val,
+                                'top_k_int': actual_k,
+                                'use_flooding': False # Start with clean run logic
+                            }
+                            all_jobs.append(params)
+
+    # 2. Shuffle jobs to balance load 
+    # This prevents one core from getting stuck with all the slow (e.g., Tree) runs
+    # while others finish early.
+    # random.shuffle(all_jobs)
+
+    print(f"Dispatched {len(all_jobs)} jobs to workers.")
+    print("Starting execution using n_jobs=-2 (All CPUs minus 1)...")
+    
+    # 3. Run in Parallel
+    # verbose=10 gives nice progress updates in the terminal
+    Parallel(n_jobs=-2, verbose=10)(
+        delayed(run_single_wrapper)(p) for p in all_jobs
+    )
+
+    print("Grid Search Complete.")
