@@ -276,7 +276,7 @@ def run_single_wrapper(params):
                     if k not in ['clean', 'val_best']:
                         row[f"mse_{k}"] = v
                 
-                with csv_lock:
+                with local_csv_lock:
                     save_results_to_csv(row)
                     
             except Exception as e:
@@ -333,15 +333,10 @@ if __name__ == "__main__":
                             }
                             all_jobs.append(params)
 
-    # 2. Shuffle jobs to balance load 
-    # This prevents one core from getting stuck with all the slow (e.g., Tree) runs
-    # while others finish early.
-    # random.shuffle(all_jobs)
-
     print(f"Dispatched {len(all_jobs)} jobs to workers.")
     print("Starting execution using n_jobs=-2 (All CPUs minus 1)...")
     
-    # 3. Run in Parallel
+    # Run in Parallel
     # verbose=10 gives nice progress updates in the terminal
     Parallel(n_jobs=-2, verbose=10)(
         delayed(run_single_wrapper)(p) for p in all_jobs
