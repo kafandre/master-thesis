@@ -338,7 +338,7 @@ if __name__ == "__main__":
     
     # Run in Parallel
     # verbose=10 gives nice progress updates in the terminal
-    Parallel(n_jobs=-2, verbose=10)(
+    Parallel(n_jobs=-2, verbose=10, batch_size=1)(
         delayed(run_single_wrapper)(p) for p in all_jobs
     )
 
