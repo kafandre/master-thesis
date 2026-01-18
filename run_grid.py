@@ -228,7 +228,7 @@ def run_single_wrapper(params):
 
     # --- 2. FLOODING RUN SETUP ---
     # Only run flooding if method is not "Vanilla" (and if Clean run succeeded)
-    if params['name'] != "Vanilla" and min_train_loss is not None:
+    if params['method'] != "Vanilla" and min_train_loss is not None:
         
         target_flood_level = min_train_loss * 1.05
         
