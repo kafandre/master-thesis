@@ -228,9 +228,15 @@ def run_single_wrapper(params):
 
     # --- 2. FLOODING RUN SETUP ---
     # Only run flooding if method is not "Vanilla" (and if Clean run succeeded)
-    if params['method'] != "Vanilla" and min_train_loss is not None:
+    if min_train_loss is not None:
         
-        target_flood_level = min_train_loss * 1.05
+        # Calculate flood level: train_loss at (best_val_iter + 50)
+        best_val_idx = np.argmin(clean_history['val_loss'])
+        
+        # Add 50 iterations, but clamp to the last iteration if the run wasn't long enough
+        target_idx = min(best_val_idx + 50, len(clean_history['train_loss']) - 1)
+        
+        target_flood_level = clean_history['train_loss'][target_idx]
         
         flood_params = params.copy()
         flood_params['use_flooding'] = True
