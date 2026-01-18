@@ -11,7 +11,7 @@ class config:
     
     # --- Data Levels (Synthetic Only) ---
     dims = [5, 25]           
-    sizes = [100, 1000]              
+    sizes = [200, 1000]              
     noise_levels = [3.0, 10.0]
 
     # --- Base Learners (3 types) ---
@@ -19,12 +19,12 @@ class config:
     
     # Static Hyperparameters
     poly_degree = 2
-    tree_depth = 2
+    tree_depth = 1
     
     # Fixed Method Params
     top_k = 5
     momentum_decay = 0.9
-    momentum_strength = 5.0
+    momentum_strength = 10.0
 
     flood_level = None
 
@@ -33,7 +33,7 @@ class config:
     
     # Experiment Config
     n_estimators = 1000
-    learning_rate = 0.1
+    learning_rate = 0.05
     train_split = 0.7
     val_split = 0.15
 

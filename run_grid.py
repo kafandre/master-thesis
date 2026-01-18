@@ -15,7 +15,7 @@ from joblib import Parallel, delayed
 from filelock import FileLock 
 
 # --- Setup Directories ---
-RESULTS_DIR = "results"
+RESULTS_DIR = "results2"
 HISTORY_DIR = os.path.join(RESULTS_DIR, "histories")
 PLOTS_DIR = os.path.join(RESULTS_DIR, "plots")
 SUMMARY_FILE = os.path.join(RESULTS_DIR, "grid_summary.csv")
@@ -66,15 +66,15 @@ method_configs = [
     {"name": "Momentum",            "mom": True,  "topk": False, "batch": None},
     
     # 2. Pure Minibatch
-    {"name": "Minibatch",           "mom": False, "topk": False, "batch": "half_train"},
+    # {"name": "Minibatch",           "mom": False, "topk": False, "batch": "half_train"},
     
     # 3. Double Combinations
     {"name": "TopK+Momentum",       "mom": True,  "topk": True,  "batch": None},
-    {"name": "TopK+Minibatch",      "mom": False, "topk": True,  "batch": "half_train"},
-    {"name": "Momentum+Minibatch",  "mom": True,  "topk": False, "batch": "half_train"},
+    # {"name": "TopK+Minibatch",      "mom": False, "topk": True,  "batch": "half_train"},
+    # {"name": "Momentum+Minibatch",  "mom": True,  "topk": False, "batch": "half_train"},
     
     # 4. All Three
-    {"name": "All",                 "mom": True,  "topk": True,  "batch": "half_train"},
+    # {"name": "All",                 "mom": True,  "topk": True,  "batch": "half_train"},
 ]
 
 # --- Helper Functions ---
