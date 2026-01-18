@@ -61,32 +61,24 @@ sys.stderr = sys.stdout
 # --- Configuration Generation ---
 method_configs = [
     # 1. Single Mechanics (or None)
-    {"name": "Vanilla",             "mom": False, "topk": False, "batch": None},
-    {"name": "TopK",                "mom": False, "topk": True,  "batch": None},
-    {"name": "Momentum",            "mom": True,  "topk": False, "batch": None},
+    {"name": "Vanilla",             "mom": False, "topk": False},
+    {"name": "TopK",                "mom": False, "topk": True},
+    {"name": "Momentum",            "mom": True,  "topk": False},
     
-    # 2. Pure Minibatch
-    # {"name": "Minibatch",           "mom": False, "topk": False, "batch": "half_train"},
-    
-    # 3. Double Combinations
-    {"name": "TopK+Momentum",       "mom": True,  "topk": True,  "batch": None},
-    # {"name": "TopK+Minibatch",      "mom": False, "topk": True,  "batch": "half_train"},
-    # {"name": "Momentum+Minibatch",  "mom": True,  "topk": False, "batch": "half_train"},
-    
-    # 4. All Three
-    # {"name": "All",                 "mom": True,  "topk": True,  "batch": "half_train"},
+    # 2. Double Combinations
+    {"name": "TopK+Momentum",       "mom": True,  "topk": True},
 ]
 
 # --- Helper Functions ---
 
 def get_run_signature(params):
     """Creates a unique string ID for a run to check for duplicates/completion."""
-    # Order matters: learner, dim, n, noise, method, batch, seed, flood
+    # Order matters: learner, dim, n, noise, method, seed, flood
     # We do NOT include flood_level value in signature check for the boolean flag,
     # but we DO include 'flooding' status.
     sig = (
         f"{params['base_learner']}_d{params['dim']}_n{params['n_samples']}_"
-        f"ns{params['noise_std']}_{params['method']}_b{params['batch']}_"
+        f"ns{params['noise_std']}_{params['method']}_"
         f"s{params['seed']}_flood{params['use_flooding']}"
     )
     return sig.replace(" ", "")
@@ -105,8 +97,6 @@ def get_filename_base(params, flood_level_val=None):
         name += f"_momStr{config.momentum_strength}_momDec{config.momentum_decay}"
     if params['topk']:
         name += f"_topk{params['top_k_int']}"
-    if params['batch'] is not None:
-        name += f"_batch{params['batch']}"
     
     # Flooding (Only if enabled)
     if params['use_flooding'] and flood_level_val is not None:
@@ -152,9 +142,6 @@ def run_single_wrapper(params):
     # initialize lock inside the worker
     lock_path = os.path.join(RESULTS_DIR, "grid_summary.csv.lock")
     local_csv_lock = FileLock(lock_path)
-
-    # Re-calculate batch size locally (since it was passed as int in params)
-    batch_val = params['batch']
     
     # --- 1. CLEAN RUN SETUP ---
     clean_params = params.copy()
@@ -191,7 +178,7 @@ def run_single_wrapper(params):
                 use_top_k=params['topk'],
                 use_flooding=False,
                 flood_multiplier=0.0,
-                batch_size=batch_val,
+                batch_size=None,
                 forced_flood_level=None,
                 specific_top_k=params['top_k_int']
             )
@@ -257,7 +244,7 @@ def run_single_wrapper(params):
                     use_top_k=params['topk'],
                     use_flooding=True,
                     flood_multiplier=0.0, 
-                    batch_size=batch_val,
+                    batch_size=None,
                     forced_flood_level=target_flood_level,
                     specific_top_k=params['top_k_int']
                 )
@@ -310,15 +297,6 @@ if __name__ == "__main__":
                         for seed_offset in range(config.n_seeds):
                             seed = config.SEED + seed_offset
                             
-                            # --- Calculate Dynamic Batch Size ---
-                            if method_conf['batch'] == "half_train":
-                                train_len = int(size * config.train_split) 
-                                batch_val = int(train_len / 2)             
-                            else:
-                                batch_val = method_conf['batch']
-                                if batch_val is not None:
-                                    batch_val = int(batch_val)
-
                             # --- Dynamic Top-K Logic ---
                             actual_k = 3 if dim == 5 else 5
 
@@ -332,7 +310,6 @@ if __name__ == "__main__":
                                 'method': method_conf['name'],
                                 'mom': method_conf['mom'],
                                 'topk': method_conf['topk'],
-                                'batch': batch_val,
                                 'top_k_int': actual_k,
                                 'use_flooding': False # Start with clean run logic
                             }
