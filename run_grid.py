@@ -324,7 +324,6 @@ if __name__ == "__main__":
                                 'noise_std': noise,
                                 'seed': seed,
                                 'method': method_conf['name'],
-                                'name': method_conf['name'], # helper
                                 'mom': method_conf['mom'],
                                 'topk': method_conf['topk'],
                                 'batch': batch_val,
