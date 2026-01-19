@@ -1,9 +1,7 @@
 import torch
 import numpy as np
-from typing import Optional
+from typing import Optional, Union, Tuple, List, Dict
 from sklearn.tree import DecisionTreeRegressor
-from sklearn.linear_model import LinearRegression
-from sklearn.preprocessing import PolynomialFeatures
 
 class ComponentwiseBoostingModel:
     def __init__(
@@ -79,14 +77,17 @@ class ComponentwiseBoostingModel:
                 for i in range(n_features): self.feature_momentum[i] = 0.0
             
             # Update Momentum: Inversely proportional to loss
+            # vectorized momentum update
+            mom_vec = torch.tensor([self.feature_momentum[i] for i in range(n_features)], device=losses_tensor.device)
+            mom_vec *= self.momentum_decay
+            scores = 1.0 / (losses_tensor + self.eps_momentum)
+            mom_vec += self.momentum_strength * scores
+            
+            # Write back to dictionary
             for i in range(n_features):
-                self.feature_momentum[i] *= self.momentum_decay
-                score = 1.0 / (losses_tensor[i].item() + self.eps_momentum)
-                self.feature_momentum[i] += self.momentum_strength * score
+                self.feature_momentum[i] = mom_vec[i].item()
                 
-            # Higher momentum -> Lower Adjusted Loss (Better chance to be picked)
-            momentum_vec = torch.tensor([self.feature_momentum[i] for i in range(n_features)])
-            adjusted_losses = losses_tensor - momentum_vec
+            adjusted_losses = losses_tensor - mom_vec
         else:
             adjusted_losses = losses_tensor
 
@@ -103,7 +104,109 @@ class ComponentwiseBoostingModel:
             
         return selected_idx
 
+    # Vectorized Solvers
+
+    def _solve_linear_vectorized(self, X_batch, target):
+        """
+        Solves y = beta * x for all features simultaneously
+        """
+
+        # X_batch: (B, F)
+        # target: (B, ) -> (B, 1)
+        target = target.unsqueeze(1)
+        
+        # Numerator: X^T * y -> (F, B) @ (B, 1) -> (F, 1) -> (F,)
+        numer = (X_batch * target).sum(dim=0)
+        
+        # Denom: X^T * X -> Diagonal only since we solve per feature independently
+        denom = (X_batch ** 2).sum(dim=0)
+        
+        beta = numer / (denom + self.eps_linear) # shape (F,)
+        
+        # Compute MSE for each feature
+        # Preds: X * beta -> (B, F) * (F,) no broadcast
+        # we need prediction for feature i using beta i
+        preds = X_batch * beta.unsqueeze(0) # (B, F)
+        
+        losses = ((preds - target)**2).mean(dim=0) # (F,)
+        
+        return beta, losses
+
+    def _solve_poly_vectorized(self, X_batch, target):
+        """
+        Solves Polynomial Regression for all features simultaneously.
+        Matches original logic: Includes Intercept (via LinearRegression default).
+        Form: y = b0 + b1*x + b2*x^2 ...
+        """
+        n_samples, n_features = X_batch.shape
+        device = X_batch.device
+        
+        # 1. Construct Design Matrices for all features
+        # We want [1, x, x^2] for every feature.
+        # Output shape: (n_features, n_samples, degree+1)
+        
+        # Powers: 1 to degree
+        exponents = torch.arange(1, self.poly_degree + 1, device=device).float()
+        
+        # X_batch unsqueezed: (N, F, 1)
+        X_expanded = X_batch.unsqueeze(-1)
+        
+        # Feature powers: (N, F, degree)
+        # Note: Depending on memory, this can be large.
+        poly_features = X_expanded.pow(exponents)
+        
+        # Add Bias term (column of 1s): (N, F, 1)
+        bias = torch.ones(n_samples, n_features, 1, device=device)
+        
+        # Design Matrix A: (N, F, d+1)
+        A = torch.cat([bias, poly_features], dim=2)
+        
+        # Permute for batch solving: (F, N, d+1)
+        A = A.permute(1, 0, 2)
+        
+        # Target Y: (F, N, 1) (Same target for all features)
+        Y = target.view(1, n_samples, 1).expand(n_features, n_samples, 1)
+        
+        # 2. Solve Normal Equations: (A^T A) beta = A^T Y
+        # A_T: (F, d+1, N)
+        A_T = A.transpose(1, 2)
+        
+        # ATA: (F, d+1, d+1)
+        ATA = torch.bmm(A_T, A)
+        
+        # ATY: (F, d+1, 1)
+        ATY = torch.bmm(A_T, Y)
+        
+        # Regularization for stability
+        I = torch.eye(self.poly_degree + 1, device=device).unsqueeze(0).expand(n_features, -1, -1)
+        ATA_reg = ATA + self.eps_linear * I
+        
+        # Solve
+        # beta shape: (F, d+1, 1)
+        beta = torch.linalg.solve(ATA_reg, ATY)
+        
+        # 3. Compute Losses
+        # Preds = A @ beta -> (F, N, d+1) @ (F, d+1, 1) -> (F, N, 1)
+        preds = torch.bmm(A, beta).squeeze(-1) # (F, N)
+        
+        # Target is (N,)
+        target_rep = target.unsqueeze(0) # (1, N)
+        
+        losses = ((preds - target_rep)**2).mean(dim=1) # (F,)
+        
+        return beta.squeeze(-1), losses
+
     def fit(self, X_train, y_train, X_val=None, y_val=None, X_test=None, y_test=None):
+        # Convert all inputs to float tensors if they aren't already
+        X_train = torch.as_tensor(X_train, dtype=torch.float32)
+        y_train = torch.as_tensor(y_train, dtype=torch.float32)
+        if X_val is not None:
+            X_val = torch.as_tensor(X_val, dtype=torch.float32)
+            y_val = torch.as_tensor(y_val, dtype=torch.float32)
+        if X_test is not None:
+            X_test = torch.as_tensor(X_test, dtype=torch.float32)
+            y_test = torch.as_tensor(y_test, dtype=torch.float32)
+
         self.intercept_ = torch.mean(y_train).item()
         curr_pred_train = torch.full_like(y_train, self.intercept_)
         
@@ -123,60 +226,112 @@ class ComponentwiseBoostingModel:
         self.best_iteration_ = 0
 
         for i in range(self.n_estimators):        
-            # Evaluate all features
-            for f_idx in range(n_features):
-                # Mini-batch sampling
-                if self.batch_size is not None and self.batch_size < n_samples:
-                    # Randomly sample indices for this iteration
-                    batch_idx = np.random.choice(n_samples, self.batch_size, replace=False)   
-                    # creating batch views
-                    X_batch = X_train[batch_idx]
-                    y_batch = y_train[batch_idx]
-                    curr_pred_batch = curr_pred_train[batch_idx]
+            
+            # Mini-batch sampling
+            if self.batch_size is not None and self.batch_size < n_samples:
+                batch_idx = torch.randperm(n_samples)[:self.batch_size]
+                X_batch = X_train[batch_idx]
+                y_batch = y_train[batch_idx]
+                curr_pred_batch = curr_pred_train[batch_idx]
+            else:
+                X_batch = X_train
+                y_batch = y_train
+                curr_pred_batch = curr_pred_train
 
-                else:
-                    #Fallback to full batch
-                    X_batch = X_train
-                    y_batch = y_train
-                    curr_pred_batch = curr_pred_train
+            grad = self._get_gradient(curr_pred_batch, y_batch)
+            target = -grad
 
-                grad = self._get_gradient(curr_pred_batch, y_batch)
-                target = -grad
-
+            # --- OPTIMIZED FEATURE SELECTION ---
+            
+            best_idx = -1
+            best_params = None
+            best_model_obj = None # Only for trees
+            
+            if self.base_learner == "linear":
+                betas, losses = self._solve_linear_vectorized(X_batch, target)
+                best_idx = self._select_feature(losses)
+                best_params = betas[best_idx] # Tensor
+                
+            elif self.base_learner == "polynomial":
+                betas, losses = self._solve_poly_vectorized(X_batch, target)
+                best_idx = self._select_feature(losses)
+                best_params = betas[best_idx] # Tensor (coefficients)
+                
+            elif self.base_learner == "tree":
+                # Trees cannot be easily vectorized on CPU without C++, keep loop
                 feature_losses = []
                 feature_models = []
-
-                # Evaluate all features using BATCH data
+                
+                # Pre-convert to numpy once per batch to avoid overhead in loop?
+                # Sklearn needs numpy.
+                X_batch_np = X_batch.detach().numpy()
+                target_np = target.detach().numpy()
+                
                 for f_idx in range(n_features):
-                    x_f = X_batch[:, f_idx:f_idx+1] # Slice batch feature
-                    model = self._create_base_learner()
-                    model = self._fit_base_learner(model, x_f, target)
+                    x_f = X_batch_np[:, f_idx:f_idx+1]
+                    model = DecisionTreeRegressor(max_depth=self.tree_max_depth)
+                    model.fit(x_f, target_np)
                     
-                    # Calculate loss against batch gradient
-                    pred = self._predict_base_learner(model, x_f).squeeze()
-                    loss = torch.mean((pred - target.squeeze())**2)
+                    pred = model.predict(x_f)
+                    loss = np.mean((pred - target_np)**2)
                     
                     feature_losses.append(loss)
                     feature_models.append(model)
-
-            # Select Best Feature
-            best_idx = self._select_feature(torch.tensor(feature_losses))
-            best_model = feature_models[best_idx]
+                
+                best_idx = self._select_feature(torch.tensor(feature_losses))
+                best_model_obj = feature_models[best_idx]
             
-            # Update State
-            self.estimators_.append((best_idx, best_model))
+            # --- Store Best Learner ---
+            self.estimators_.append({
+                'idx': best_idx,
+                'learner': self.base_learner,
+                'params': best_params,   # Tensor for Lin/Poly
+                'model': best_model_obj  # Object for Tree
+            })
             self.history['selected_features'].append(best_idx)
             
-            # Global Update on FULL SET
-            # predict on the FULL X_train to keep residuals correct for next iteration
-            x_f_train_full = X_train[:, best_idx:best_idx+1]
-            update = self._predict_base_learner(best_model, x_f_train_full).squeeze() * self.learning_rate
-            curr_pred_train += update
+            # --- Global Update ---
+            # We must predict on the FULL sets now
             
-            # Val
+            def compute_update(X_data, learner_idx, learner_info):
+                x_f = X_data[:, learner_idx:learner_idx+1] # (N, 1)
+                
+                if self.base_learner == "linear":
+                    # y = x * beta
+                    return (x_f * learner_info['params']).flatten()
+                
+                elif self.base_learner == "polynomial":
+                    # y = b0 + b1*x + b2*x^2 ...
+                    # params is [b0, b1, b2...]
+                    params = learner_info['params']
+                    N = x_f.shape[0]
+                    
+                    # Design Matrix: [1, x, x^2...]
+                    # Or simple Horner's method / accumulation
+                    pred = torch.full((N,), params[0].item(), device=X_data.device)
+                    pow_x = x_f.flatten()
+                    
+                    for p in range(1, len(params)):
+                        pred += params[p] * pow_x 
+                        pow_x = pow_x * x_f.flatten()
+                        
+                    return pred
+                    
+                elif self.base_learner == "tree":
+                    # Use Sklearn
+                    x_np = x_f.detach().numpy()
+                    pred_np = learner_info['model'].predict(x_np)
+                    return torch.from_numpy(pred_np).float()
+
+            learner_data = self.estimators_[-1]
+            
+            # Train Update
+            update_train = compute_update(X_train, best_idx, learner_data) * self.learning_rate
+            curr_pred_train += update_train
+            
+            # Val Update
             if X_val is not None:
-                x_f_val = X_val[:, best_idx:best_idx+1]
-                update_val = self._predict_base_learner(best_model, x_f_val).squeeze() * self.learning_rate
+                update_val = compute_update(X_val, best_idx, learner_data) * self.learning_rate
                 curr_pred_val += update_val
                 
                 val_mse = torch.mean((curr_pred_val - y_val)**2).item()
@@ -186,72 +341,62 @@ class ComponentwiseBoostingModel:
                     best_val_loss = val_mse
                     self.best_iteration_ = i + 1
             
-            # Test
+            # Test Update
             if X_test is not None:
-                x_f_test = X_test[:, best_idx:best_idx+1]
-                update_test = self._predict_base_learner(best_model, x_f_test).squeeze() * self.learning_rate
+                update_test = compute_update(X_test, best_idx, learner_data) * self.learning_rate
                 curr_pred_test += update_test
                 test_mse = torch.mean((curr_pred_test - y_test)**2).item()
                 self.history['test_loss'].append(test_mse)
 
             # Train Loss
-            # Log Full Training Loss (to observe Double Descent properly)
-            # For history we log MSE to be comparable, even if we optimize with Flooding
             train_mse = torch.mean((curr_pred_train - y_train)**2).item()
             self.history['train_loss'].append(train_mse)
 
-            # Print iteration, train MSE & test MSE
-            print(f"Iter {i+1}/{self.n_estimators} | Train MSE: {train_mse:.5f} | Test MSE: {self.history['test_loss'][-1] if len(self.history['test_loss']) > i else 'N/A'}")
-
-    def _create_base_learner(self):
-        if self.base_learner == "linear":
-            return torch.nn.Linear(1, 1, bias=False)
-        elif self.base_learner == "polynomial":
-            return PolynomialRegressionWrapper(degree=self.poly_degree)
-        elif self.base_learner == "tree":
-            return DecisionTreeRegressor(max_depth=self.tree_max_depth)
-
-    def _fit_base_learner(self, model, X, y):
-        if self.base_learner == "linear":
-            xtx = torch.matmul(X.t(), X)
-            xty = torch.matmul(X.t(), y.unsqueeze(1) if y.dim()==1 else y)
-            beta = xty / (xtx + self.eps_linear)
-            model.weight.data = beta.t()
-            return model
-        else:
-            X_np = X.detach().numpy()
-            y_np = y.detach().numpy()
-            model.fit(X_np, y_np)
-            return model
-
-    def _predict_base_learner(self, model, X):
-        if self.base_learner == "linear":
-            return model(X)
-        else:
-            X_np = X.detach().numpy()
-            pred = model.predict(X_np)
-            return torch.tensor(pred, dtype=torch.float32).unsqueeze(1)
+            if (i+1) % 50 == 0:
+                print(f"Iter {i+1}/{self.n_estimators} | Train MSE: {train_mse:.5f}")
 
     def predict(self, X, use_best_model=False):
+        X = torch.as_tensor(X, dtype=torch.float32)
         pred = torch.full((X.shape[0],), self.intercept_)
         
         limit = self.best_iteration_ if use_best_model and self.best_iteration_ > 0 else len(self.estimators_)
         estimators_to_use = self.estimators_[:limit]
             
-        for f_idx, model in estimators_to_use:
+        for est in estimators_to_use:
+            f_idx = est['idx']
             x_f = X[:, f_idx:f_idx+1]
-            pred += self._predict_base_learner(model, x_f).squeeze() * self.learning_rate
+            
+            update = None
+            if est['learner'] == 'linear':
+                update = (x_f * est['params']).flatten()
+                
+            elif est['learner'] == 'polynomial':
+                params = est['params']
+                N = x_f.shape[0]
+                update = torch.full((N,), params[0].item(), device=X.device)
+                pow_x = x_f.flatten()
+                for p in range(1, len(params)):
+                    update += params[p] * pow_x
+                    pow_x = pow_x * x_f.flatten()
+                    
+            elif est['learner'] == 'tree':
+                x_np = x_f.detach().numpy()
+                pred_np = est['model'].predict(x_np)
+                update = torch.from_numpy(pred_np).float()
+            
+            pred += update * self.learning_rate
             
         return pred
 
-class PolynomialRegressionWrapper:
-    def __init__(self, degree):
-        self.degree = degree
-        self.poly = PolynomialFeatures(degree=degree, include_bias=False)
-        self.model = LinearRegression()
-    def fit(self, X, y):
-        x_poly = self.poly.fit_transform(X)
-        self.model.fit(x_poly, y)
-    def predict(self, X):
-        x_poly = self.poly.transform(X)
-        return self.model.predict(x_poly)
+    @staticmethod
+    def load_model(path):
+        import pickle
+        with open(path, 'rb') as f:
+            return pickle.load(f)
+
+    def save_model(self, path):
+        import pickle
+        import os
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'wb') as f:
+            pickle.dump(self, f)
