@@ -224,6 +224,12 @@ def run_single_wrapper(params):
         target_idx = min(best_val_idx + 50, len(clean_history['train_loss']) - 1)
         
         target_flood_level = clean_history['train_loss'][target_idx]
+
+        # Adjustment for Flat Tails
+        # If min_train_loss is within 2% of the target (curve is flat),
+        # boost the flood level by 5% to ensure it forces a change in dynamics
+        if min_train_loss > 0.98 * target_flood_level:
+            target_flood_level = min_train_loss * 1.05
         
         flood_params = params.copy()
         flood_params['use_flooding'] = True
