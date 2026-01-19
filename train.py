@@ -59,7 +59,6 @@ def run_experiment(
     y_test_clean = dataset_clean.y[test_idx]
     
     # --- Determine Flood Level ---
-    # Prioritize forced_flood_level if provided
     if forced_flood_level is not None:
         flood_level = forced_flood_level
     elif default_config.flood_level is None:
@@ -90,7 +89,7 @@ def run_experiment(
         eps_linear=default_config.eps_linear
     )
     
-    # Fit
+    # Fit (Note: Inputs are already Tensors, model handles device)
     model.fit(
         X_train, y_train,
         X_val, y_val,
@@ -124,7 +123,6 @@ def run_experiment(
                 drift_type=d_type,
                 drift_magnitude=d_mag
             )
-            # Use SAME test indices
             X_test_drift = ds_drift.x[test_idx]
             y_test_drift = ds_drift.y[test_idx]
             
@@ -145,6 +143,9 @@ def run_experiment(
 
 if __name__ == "__main__":
     plt.ion()
+    
+    # Ensure single threaded execution for the demo
+    torch.set_num_threads(1)
 
     # Format: (Name, Momentum, Top-K, Batch Size)
     settings_list = [
@@ -179,23 +180,18 @@ if __name__ == "__main__":
         scores = res['scores']
         print(f"--- Evaluation Scores (Best Iter: {res['best_iter']}) ---")
         
-        # Create a formatted string for both Print and Plot
         score_text = f"Best Iter: {res['best_iter']}\n\n"
         for key, value in scores.items():
-            # Format: 'meaningful_weak: 0.1234'
             line = f"{key}: {value:.4f}"
             print(line)
             score_text += line + "\n"
         print("-----------------------------------------------------")
 
-        # 2. Extract Data
         history = res['history']
         flood_level = res['flood_level']
         
-        # 3. Plotting
         plt.figure(figsize=(12, 7))
         
-        # Plot Losses
         if 'train_loss' in history:
             plt.plot(history['train_loss'], label='Train Loss', color='blue', alpha=0.6, linewidth=1)
         
@@ -205,29 +201,21 @@ if __name__ == "__main__":
         if 'test_loss' in history and len(history['test_loss']) > 0:
             plt.plot(history['test_loss'], label='Test Loss (Clean)', color='red', alpha=0.8, linewidth=1.5)
         
-        # Plot Flood Level Horizontal Line
         plt.axhline(y=flood_level, color='black', linestyle='--', linewidth=2, label=f'Flood Level ({flood_level:.3f})')
         
-        # Adding Evaluation Scores to Plot
-        # 1. Shrink the plot area slightly to make room on the right
         plt.subplots_adjust(right=0.70) 
         
-        # 2. Add the text box (x=1.05 puts it just outside the plot)
         plt.text(
-            1.05, 0.5,                  # x, y position (relative to axes)
-            score_text,                 # The text string
+            1.05, 0.5,                  
+            score_text,                 
             transform=plt.gca().transAxes, 
             fontsize=10, 
             verticalalignment='center',
             bbox=dict(boxstyle="round,pad=0.5", facecolor='white', alpha=0.9, edgecolor='gray')
         )
 
-        # Sanitized name for file system
         safe_setting_name = setting['name'].replace(" ", "_").replace("(", "").replace(")", "")
-
-        # --- OPTIMIZED TITLES & NAMES ---
         
-        # 1. Build a suffix based on active hyperparameters
         param_suffix = ""
         if setting['mom']:
             param_suffix += f"_momStr{default_config.momentum_strength}_momDec{default_config.momentum_decay}"
@@ -236,18 +224,14 @@ if __name__ == "__main__":
         if setting['batch'] is not None:
             param_suffix += f"_batch{setting['batch']}"
             
-        # Sanitized setting name for file system
         safe_setting_name = setting['name'].replace(" ", "_").replace("(", "").replace(")", "")
 
-        # 2. Define Title and Filename based on Dataset Type
         if default_config.DATASET_TYPE == 'real':
-            # --- REAL DATA ---
             plot_title = (
                 f"{setting['name']} | {default_config.demo_base_learner}\n"
                 f"Dataset: {default_config.DATASET_NAME} | "
                 f"Flood x{default_config.demo_flood_multiplier} (Lvl: {flood_level:.3f})"
             )
-            
             filename = (
                 f"Plot_{safe_setting_name}_"
                 f"{default_config.demo_base_learner}_"
@@ -256,14 +240,12 @@ if __name__ == "__main__":
                 f"floodMul{default_config.demo_flood_multiplier}.png"
             )
         else:
-            # --- SYNTHETIC DATA ---
             plot_title = (
                 f"{setting['name']} | {default_config.demo_base_learner}\n"
                 f"N={default_config.demo_n_samples} ({default_config.demo_dim_mode}) | "
                 f"Noise={default_config.demo_noise_std} | "
                 f"Flood x{default_config.demo_flood_multiplier} (Lvl: {flood_level:.3f})"
             )
-            
             filename = (
                 f"Plot_{safe_setting_name}_"
                 f"{default_config.demo_base_learner}_"
@@ -273,14 +255,12 @@ if __name__ == "__main__":
                 f"floodMul{default_config.demo_flood_multiplier}.png"
             )
 
-        # Styling
         plt.xlabel('Boosting Iterations')
         plt.ylabel('MSE Loss')
         plt.title(plot_title)
         plt.legend()
         plt.grid(True, linestyle=':', alpha=0.6)
         
-        # 4. Save and Show
         plt.tight_layout()
         plt.savefig(filename)
         
@@ -288,5 +268,5 @@ if __name__ == "__main__":
         plt.pause(0.1)
 
     print("All runs finished. Close plot windows to exit.")
-    plt.ioff() # Turn interactive mode off
-    plt.show() # Blocking call to keep windows open until you close them
+    plt.ioff()
+    plt.show()
