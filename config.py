@@ -1,6 +1,6 @@
 class config:
     SEED = 200
-    n_seeds = 10 
+    n_seeds = 30 
     
     # --- Dataset Configuration ---
     # Options: "synthetic" or "real"
@@ -10,8 +10,8 @@ class config:
     DATASET_NAME = "riboflavin"
     
     # --- Data Levels (Synthetic Only) ---
-    dims = [5, 25]           
-    sizes = [200, 1000]              
+    dims = [20,100,200]
+    sizes = [200,500]              
     noise_levels = [3.0, 10.0]
 
     # --- Base Learners (3 types) ---

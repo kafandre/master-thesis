@@ -16,7 +16,7 @@ from joblib import Parallel, delayed
 from filelock import FileLock 
 
 # --- Setup Directories ---
-RESULTS_DIR = "results3"
+RESULTS_DIR = "results4"
 HISTORY_DIR = os.path.join(RESULTS_DIR, "histories")
 PLOTS_DIR = os.path.join(RESULTS_DIR, "plots")
 SUMMARY_FILE = os.path.join(RESULTS_DIR, "grid_summary.csv")
@@ -253,6 +253,9 @@ if __name__ == "__main__":
     
     for base_learner in config.base_learners:
         for dim in config.dims:
+            # Skip 200 dimensions for tree learner
+            if base_learner == "tree" and dim == 200:
+                continue
             for size in config.sizes:
                 for noise in config.noise_levels:
                     for method_conf in method_configs:
