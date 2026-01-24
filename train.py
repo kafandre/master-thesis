@@ -76,6 +76,7 @@ def run_experiment(
         base_learner=base_learner,
         poly_degree=default_config.poly_degree,
         tree_max_depth=default_config.tree_depth,
+        n_bins=default_config.n_bins,
         loss='flooding' if use_flooding else 'mse',
         flood_level=flood_level,
         use_momentum=use_momentum,

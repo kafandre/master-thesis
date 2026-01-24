@@ -12,6 +12,7 @@ class ComponentwiseBoostingModel:
         base_learner: str = "polynomial",
         poly_degree: int = 2,
         tree_max_depth: int = 2,
+        n_bins: int = 32,
         spline_degree: int = 2,
         n_knots: int = 10,
         loss: str = 'mse', # 'mse' or 'flooding'
@@ -31,6 +32,9 @@ class ComponentwiseBoostingModel:
         self.base_learner = base_learner
         self.poly_degree = poly_degree
         self.tree_max_depth = tree_max_depth
+
+        # Binning for trees
+        self.n_bins = n_bins
         
         # Store spline params
         self.spline_degree = spline_degree
@@ -207,6 +211,77 @@ class ComponentwiseBoostingModel:
         
         return beta.squeeze(-1), losses
 
+    def _solve_tree_vectorized(self, X_binned, target, bin_edges):
+        """
+        Solves Decision Stump (Depth=1) for all features simultaneously using
+        Histogram-based optimization (Lookup Table).
+        
+        Args:
+            X_binned: (N, F) LongTensor of bin indices (0 to n_bins-1)
+            target: (N,) Tensor of gradients/residuals
+            bin_edges: (F, n_bins+1) Tensor of bin boundaries
+        """
+        n_samples, n_features = X_binned.shape
+        n_bins = self.n_bins
+        device = X_binned.device
+
+        # 1. Efficient Histogram Aggregation (Vectorized)
+        # Offsets to shift indices for each feature: [0, n_bins, 2*n_bins, ...]
+        offsets = (torch.arange(n_features, device=device) * n_bins).view(1, -1)
+        flat_indices = (X_binned + offsets).view(-1)  # (N*F,)
+        
+        # Expand target for all features
+        flat_target = target.view(-1, 1).expand(-1, n_features).reshape(-1)
+        
+        # Aggregate Sums (G) and Counts (N)
+        # G[i] = Sum of targets in absolute bin i
+        G_flat = torch.zeros(n_features * n_bins, device=device)
+        N_flat = torch.zeros(n_features * n_bins, device=device)
+        
+        G_flat.index_add_(0, flat_indices, flat_target)
+        N_flat.index_add_(0, flat_indices, torch.ones_like(flat_target))
+        
+        # Reshape back to (F, n_bins)
+        G = G_flat.view(n_features, n_bins)
+        N = N_flat.view(n_features, n_bins)
+        
+        # 2. Compute Cumulative Sums (Left vs Right Splits)
+        # G_L[k] = Sum of targets for bins 0..k
+        G_L = torch.cumsum(G, dim=1)
+        N_L = torch.cumsum(N, dim=1)
+        
+        # Totals for each feature
+        G_T = G_L[:, -1:] # (F, 1)
+        N_T = N_L[:, -1:] # (F, 1)
+        
+        # Right splits
+        G_R = G_T - G_L
+        N_R = N_T - N_L
+        
+        # 3. Calculate Gain (MSE Reduction Proxy)
+        # Gain = G_L^2 / N_L + G_R^2 / N_R
+        # Add epsilon to avoid div by zero
+        eps = 1e-6
+        gain = (G_L**2 / (N_L + eps)) + (G_R**2 / (N_R + eps))
+        
+        # Mask invalid splits (where Left or Right has 0 samples)
+        # We only consider splits at bin boundaries 0 to n_bins-2 (n_bins-1 is the last bucket)
+        valid_mask = (N_L > 0) & (N_R > 0)
+        # Also, we cannot split after the very last bin (no right child)
+        valid_mask[:, -1] = False 
+        
+        gain[~valid_mask] = -1.0 # Ignore invalid
+        
+        # 4. Find Best Split per Feature
+        # max_gain_per_feat, best_bin_idx = torch.max(gain, dim=1)
+        
+        # Calculate losses for feature selection logic
+        # MSE = sum(y^2) - Gain. Since sum(y^2) is constant, minimizing MSE <=> maximizing Gain
+        # We return "negative gain" as loss because the selector picks min(loss)
+        neg_gain_per_feat = -torch.max(gain, dim=1).values
+        
+        return gain, neg_gain_per_feat
+
     def _solve_bspline_vectorized(self, X_batch, target):
         """
         Solves B-Spline Regression for all features simultaneously.
@@ -321,6 +396,40 @@ class ComponentwiseBoostingModel:
                 
                 self.feature_knots_[f_idx] = t
         
+        # --- NEW: Pre-compute Bins for Trees ---
+        X_train_binned = None
+        self.bin_edges_ = {}
+        
+        if self.base_learner == "tree":
+            # Quantile Binning
+            X_train_np = X_train.detach().cpu().numpy()
+            X_binned_list = []
+            
+            # Compute percentiles for bin edges
+            percentiles = torch.linspace(0, 1, self.n_bins + 1, device=X_train.device)
+            
+            # We compute edges for all features using torch.quantile
+            # Note: For very large data, do this on CPU or subsample
+            self.all_bin_edges = torch.quantile(X_train, percentiles, dim=0).T # (F, n_bins+1)
+            
+            # Add epsilon to last edge to include max value
+            self.all_bin_edges[:, -1] += 1e-4
+            
+            # Bucketize (Vectorized binning)
+            # torch.bucketize only works with 1D boundaries, so we loop or use searchsorted
+            # Faster to loop over F for binning step once
+            for f_idx in range(n_features):
+                # buckets are 0 to n_bins (we clip to n_bins-1)
+                edges = self.all_bin_edges[f_idx]
+                # Force monotonicity to avoid errors
+                edges, _ = torch.sort(edges)
+                binned = torch.bucketize(X_train[:, f_idx], edges)
+                # Clamp to range [0, n_bins-1]
+                binned = torch.clamp(binned - 1, 0, self.n_bins - 1)
+                X_binned_list.append(binned)
+            
+            X_train_binned = torch.stack(X_binned_list, dim=1) # (N, F)
+
         # Best Model Tracking
         best_val_loss = float('inf')
         self.best_iteration_ = 0
@@ -337,6 +446,8 @@ class ComponentwiseBoostingModel:
                 X_batch = X_train
                 y_batch = y_train
                 curr_pred_batch = curr_pred_train
+                if X_train_binned is not None:
+                    X_batch_binned = X_train_binned                
 
             grad = self._get_gradient(curr_pred_batch, y_batch)
             target = -grad
@@ -368,28 +479,39 @@ class ComponentwiseBoostingModel:
                 }
                 
             elif self.base_learner == "tree":
-                # Trees cannot be easily vectorized on CPU without C++, keep loop
-                feature_losses = []
-                feature_models = []
+                gains, losses = self._solve_tree_vectorized(X_batch_binned, target, self.all_bin_edges)
                 
-                # Pre-convert to numpy once per batch to avoid overhead in loop?
-                # Sklearn needs numpy.
-                X_batch_np = X_batch.detach().numpy()
-                target_np = target.detach().numpy()
+                best_idx = self._select_feature(losses)
                 
-                for f_idx in range(n_features):
-                    x_f = X_batch_np[:, f_idx:f_idx+1]
-                    model = DecisionTreeRegressor(max_depth=self.tree_max_depth)
-                    model.fit(x_f, target_np)
-                    
-                    pred = model.predict(x_f)
-                    loss = np.mean((pred - target_np)**2)
-                    
-                    feature_losses.append(loss)
-                    feature_models.append(model)
+                # Retrieve best split details for the selected feature
+                feat_gains = gains[best_idx]
+                best_bin_idx = torch.argmax(feat_gains).item()
                 
-                best_idx = self._select_feature(torch.tensor(feature_losses))
-                best_model_obj = feature_models[best_idx]
+                # Reconstruct Leaf Values
+                # We need to re-calculate means for the chosen split to store them
+                # (Or strictly, we could return them from the solver, but re-calc is cheap for 1 feature)
+                
+                # Get the actual data for this feature to compute exact leaf values (optional)
+                # OR use the binned statistics. Let's use binned stats for speed.
+                # We need the values S_L, N_L, etc., which we computed inside the solver.
+                # To keep code clean, let's just re-compute the leaf means for the WINNER feature only.
+                
+                f_binned = X_batch_binned[:, best_idx]
+                mask_left = f_binned <= best_bin_idx
+                
+                # Compute leaf values
+                val_left = target[mask_left].mean()
+                val_right = target[~mask_left].mean()
+                
+                # The physical threshold is the upper edge of the chosen bin
+                threshold = self.all_bin_edges[best_idx, best_bin_idx + 1].item()
+                
+                best_params = {
+                    'threshold': threshold,
+                    'left_val': val_left.item(),
+                    'right_val': val_right.item()
+                }
+                best_model_obj = None
             
             # --- Store Best Learner ---
             self.estimators_.append({
@@ -447,10 +569,19 @@ class ComponentwiseBoostingModel:
                     return torch.from_numpy(pred_np).float().to(X_data.device)
                     
                 elif self.base_learner == "tree":
-                    # Use Sklearn
-                    x_np = x_f.detach().numpy()
-                    pred_np = learner_info['model'].predict(x_np)
-                    return torch.from_numpy(pred_np).float()
+                    params = learner_info['params']
+                    # Vectorized conditional
+                    # returns left_val where x <= thresh, else right_val
+                    thresh = params['threshold']
+                    l_val = params['left_val']
+                    r_val = params['right_val']
+                    
+                    pred = torch.where(
+                        x_f <= thresh,
+                        torch.tensor(l_val, device=x_f.device),
+                        torch.tensor(r_val, device=x_f.device)
+                        )
+                    return pred.flatten()
 
             learner_data = self.estimators_[-1]
             
@@ -524,9 +655,16 @@ class ComponentwiseBoostingModel:
                 update = torch.from_numpy(pred_np).float().to(X.device)
 
             elif est['learner'] == 'tree':
-                x_np = x_f.detach().numpy()
-                pred_np = est['model'].predict(x_np)
-                update = torch.from_numpy(pred_np).float()
+                params = est['params']
+                thresh = params['threshold']
+                l_val = params['left_val']
+                r_val = params['right_val']
+                
+                update = torch.where(
+                    x_f <= thresh,
+                    torch.tensor(l_val, device=X.device),
+                    torch.tensor(r_val, device=X.device))
+                update = update.flatten()
             
             pred += update * self.learning_rate
             

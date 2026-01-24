@@ -16,7 +16,7 @@ from joblib import Parallel, delayed
 from filelock import FileLock 
 
 # --- Setup Directories ---
-RESULTS_DIR = "results5"
+RESULTS_DIR = "results6"
 HISTORY_DIR = os.path.join(RESULTS_DIR, "histories")
 PLOTS_DIR = os.path.join(RESULTS_DIR, "plots")
 SUMMARY_FILE = os.path.join(RESULTS_DIR, "grid_summary.csv")
