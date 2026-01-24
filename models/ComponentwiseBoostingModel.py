@@ -2,6 +2,7 @@ import torch
 import numpy as np
 from typing import Optional, Union, Tuple, List, Dict
 from sklearn.tree import DecisionTreeRegressor
+from scipy.interpolate import BSpline
 
 class ComponentwiseBoostingModel:
     def __init__(
@@ -11,6 +12,8 @@ class ComponentwiseBoostingModel:
         base_learner: str = "polynomial",
         poly_degree: int = 2,
         tree_max_depth: int = 2,
+        spline_degree: int = 2,
+        n_knots: int = 10,
         loss: str = 'mse', # 'mse' or 'flooding'
         flood_level: float = 0.0,
         use_momentum: bool = False,
@@ -28,6 +31,11 @@ class ComponentwiseBoostingModel:
         self.base_learner = base_learner
         self.poly_degree = poly_degree
         self.tree_max_depth = tree_max_depth
+        
+        # Store spline params
+        self.spline_degree = spline_degree
+        self.n_knots = n_knots
+        
         self.loss = loss
         self.flood_level = flood_level
         
@@ -49,6 +57,9 @@ class ComponentwiseBoostingModel:
         self.estimators_ = []
         self.intercept_ = 0.0
         self.feature_momentum = {} 
+        
+        # Store global knots for bsplines: feature_idx -> knots vector
+        self.feature_knots_ = {}
         
         # History
         self.history = {
@@ -196,6 +207,62 @@ class ComponentwiseBoostingModel:
         
         return beta.squeeze(-1), losses
 
+    def _solve_bspline_vectorized(self, X_batch, target):
+        """
+        Solves B-Spline Regression for all features simultaneously.
+        Reuse the design matrix -> Normal Equations logic from Polynomial.
+        """
+        n_samples, n_features = X_batch.shape
+        device = X_batch.device
+        
+        # Number of basis functions = n_knots + degree + 1 (usually, depending on def)
+        
+        # loop over features to build the big tensor
+        
+        X_np = X_batch.detach().cpu().numpy()
+        basis_matrices = []
+        
+        for f_idx in range(n_features):
+            knots = self.feature_knots_[f_idx]
+            
+            # Clip input to knot range to prevent OutOfBounds errors
+            x_col = np.clip(X_np[:, f_idx], knots[0], knots[-1])
+            
+            # Design matrix (N, n_basis)
+            # BSpline.design_matrix returns a CSR matrix or dense depending on version/input
+            dm = BSpline.design_matrix(x_col, knots, self.spline_degree)
+            if not isinstance(dm, np.ndarray):
+                dm = dm.toarray()
+            basis_matrices.append(dm)
+            
+        # Stack to (F, N, n_basis)
+        A_np = np.stack(basis_matrices, axis=0) 
+        A = torch.from_numpy(A_np).float().to(device)
+        
+        n_basis = A.shape[2]
+        
+        # Target Y: (F, N, 1)
+        Y = target.view(1, n_samples, 1).expand(n_features, n_samples, 1)
+        
+        # Solve Normal Equations: (A^T A) beta = A^T Y
+        A_T = A.transpose(1, 2)
+        ATA = torch.bmm(A_T, A)
+        ATY = torch.bmm(A_T, Y)
+        
+        # Regularization
+        I = torch.eye(n_basis, device=device).unsqueeze(0).expand(n_features, -1, -1)
+        ATA_reg = ATA + self.eps_linear * I
+        
+        # Solve
+        beta = torch.linalg.solve(ATA_reg, ATY)
+        
+        # Compute Losses
+        preds = torch.bmm(A, beta).squeeze(-1) # (F, N)
+        target_rep = target.unsqueeze(0)
+        losses = ((preds - target_rep)**2).mean(dim=1)
+        
+        return beta.squeeze(-1), losses
+
     def fit(self, X_train, y_train, X_val=None, y_val=None, X_test=None, y_test=None):
         # Convert all inputs to float tensors if they aren't already
         X_train = torch.as_tensor(X_train, dtype=torch.float32)
@@ -220,6 +287,39 @@ class ComponentwiseBoostingModel:
 
         n_samples = X_train.shape[0]
         n_features = X_train.shape[1]
+        
+        # --- Pre-compute Knots for B-Splines if needed ---
+        if self.base_learner == "bspline":
+            X_train_np = X_train.detach().cpu().numpy()
+            for f_idx in range(n_features):
+                # --- Quantile Knots for Stability ---
+                f_min = X_train_np[:, f_idx].min()
+                f_max = X_train_np[:, f_idx].max()
+                
+                # Create percentiles (0 to 100)
+                # n_knots internal points
+                # linspace(0, 100, n_knots + 2) gives [0, ..., 100]
+                percentiles = np.linspace(0, 100, self.n_knots + 2)
+                knots_all = np.percentile(X_train_np[:, f_idx], percentiles)
+                
+                # Remove duplicates (if data is very sparse/discrete) to avoid 0-width intervals
+                knots_unique = np.unique(knots_all)
+                
+                # We need at least 2 points to define a range. 
+                if len(knots_unique) < 2:
+                    internal_knots = np.array([(f_min + f_max)/2])
+                else:
+                    internal_knots = knots_unique[1:-1]
+                
+                # Full knot vector for scipy BSpline:
+                # k+1 repeats at ends + internal knots
+                t = np.concatenate(([f_min]*(self.spline_degree), 
+                                    [f_min], 
+                                    internal_knots, 
+                                    [f_max], 
+                                    [f_max]*(self.spline_degree)))
+                
+                self.feature_knots_[f_idx] = t
         
         # Best Model Tracking
         best_val_loss = float('inf')
@@ -257,6 +357,16 @@ class ComponentwiseBoostingModel:
                 best_idx = self._select_feature(losses)
                 best_params = betas[best_idx] # Tensor (coefficients)
                 
+            elif self.base_learner == "bspline":
+                # Returns betas (F, n_basis) and losses (F,)
+                betas, losses = self._solve_bspline_vectorized(X_batch, target)
+                best_idx = self._select_feature(losses)
+                # Store coeffs AND the knots used for this feature
+                best_params = {
+                    'coeffs': betas[best_idx], 
+                    'knots': self.feature_knots_[best_idx]
+                }
+                
             elif self.base_learner == "tree":
                 # Trees cannot be easily vectorized on CPU without C++, keep loop
                 feature_losses = []
@@ -285,7 +395,7 @@ class ComponentwiseBoostingModel:
             self.estimators_.append({
                 'idx': best_idx,
                 'learner': self.base_learner,
-                'params': best_params,   # Tensor for Lin/Poly
+                'params': best_params,   # Tensor for Lin/Poly, Dict for Bspline
                 'model': best_model_obj  # Object for Tree
             })
             self.history['selected_features'].append(best_idx)
@@ -316,6 +426,25 @@ class ComponentwiseBoostingModel:
                         pow_x = pow_x * x_f.flatten()
                         
                     return pred
+                
+                elif self.base_learner == "bspline":
+                    # Params is dict {'coeffs': ..., 'knots': ...}
+                    coeffs = learner_info['params']['coeffs'].detach().cpu().numpy()
+                    knots = learner_info['params']['knots']
+                    x_np = x_f.flatten().detach().cpu().numpy()
+                    
+                    # Clip to knot range to handle unseen data (Val/Test)
+                    x_np = np.clip(x_np, knots[0], knots[-1])
+                    
+                    # Reconstruct B-Spline Design Matrix for this feature
+                    dm = BSpline.design_matrix(x_np, knots, self.spline_degree)
+                    # Handle sparse/dense
+                    if not isinstance(dm, np.ndarray):
+                        dm = dm.toarray()
+                    
+                    # Pred = DM @ coeffs
+                    pred_np = dm @ coeffs
+                    return torch.from_numpy(pred_np).float().to(X_data.device)
                     
                 elif self.base_learner == "tree":
                     # Use Sklearn
@@ -378,7 +507,22 @@ class ComponentwiseBoostingModel:
                 for p in range(1, len(params)):
                     update += params[p] * pow_x
                     pow_x = pow_x * x_f.flatten()
-                    
+            
+            elif est['learner'] == 'bspline':
+                coeffs = est['params']['coeffs'].detach().cpu().numpy()
+                knots = est['params']['knots']
+                x_np = x_f.flatten().detach().cpu().numpy()
+                
+                # Clip to knot range
+                x_np = np.clip(x_np, knots[0], knots[-1])
+
+                dm = BSpline.design_matrix(x_np, knots, self.spline_degree)
+                if not isinstance(dm, np.ndarray):
+                    dm = dm.toarray()
+                
+                pred_np = dm @ coeffs
+                update = torch.from_numpy(pred_np).float().to(X.device)
+
             elif est['learner'] == 'tree':
                 x_np = x_f.detach().numpy()
                 pred_np = est['model'].predict(x_np)
