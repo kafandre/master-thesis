@@ -16,7 +16,7 @@ from joblib import Parallel, delayed
 from filelock import FileLock 
 
 # --- Setup Directories ---
-RESULTS_DIR = "results4"
+RESULTS_DIR = "results5"
 HISTORY_DIR = os.path.join(RESULTS_DIR, "histories")
 PLOTS_DIR = os.path.join(RESULTS_DIR, "plots")
 SUMMARY_FILE = os.path.join(RESULTS_DIR, "grid_summary.csv")
@@ -185,8 +185,10 @@ def run_single_wrapper(params):
         target_idx = min(best_val_idx + 50, len(clean_history['train_loss']) - 1)
         target_flood_level = clean_history['train_loss'][target_idx]
 
-        if min_train_loss > 0.98 * target_flood_level:
-            target_flood_level = min_train_loss * 1.05
+        target_flood_level = max(target_flood_level, params['noise_std'])
+
+        if min_train_loss > 0.95 * target_flood_level:
+            target_flood_level = min_train_loss + target_flood_level * 0.05
         
         flood_params = params.copy()
         flood_params['use_flooding'] = True
