@@ -14,12 +14,16 @@ class config:
     sizes = [200,500]              
     noise_levels = [3.0, 10.0]
 
-    # --- Base Learners (3 types) ---
-    base_learners = ["linear", "polynomial", "tree"]
+    # --- Base Learners (4 types) ---
+    base_learners = ["linear", "polynomial", "tree", "bspline"]
     
     # Static Hyperparameters
     poly_degree = 2
     tree_depth = 1
+    
+    # B-Spline Configuration
+    spline_degree = 1
+    n_knots = 5  # Number of internal knots
     
     # Fixed Method Params
     top_k = 5
@@ -48,7 +52,7 @@ class config:
 
     # --- Model Stability (Epsilons) ---
     eps_momentum = 1e-6
-    eps_linear = 1e-8
+    eps_linear = 1e-5
 
     # --- Demo / Single Run Configuration (for train.py __main__) ---
     demo_seed = 100
