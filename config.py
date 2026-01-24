@@ -25,6 +25,9 @@ class config:
     spline_degree = 1
     n_knots = 5  # Number of internal knots
     
+    # Tree Configuration
+    n_bins = 32
+
     # Fixed Method Params
     top_k = 5
     momentum_decay = 0.9
