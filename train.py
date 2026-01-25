@@ -17,7 +17,6 @@ def run_experiment(
     use_top_k,
     use_flooding,
     flood_multiplier,
-    batch_size=None,
     forced_flood_level=None,
     specific_top_k=None
 ):
@@ -84,7 +83,6 @@ def run_experiment(
         top_k=current_top_k,
         momentum_decay=default_config.momentum_decay,
         momentum_strength=default_config.momentum_strength,
-        batch_size=batch_size,
         random_state=seed,
         eps_momentum=default_config.eps_momentum,
         eps_linear=default_config.eps_linear
@@ -135,7 +133,6 @@ def run_experiment(
         'scores': results,
         'history': model.history,
         'flood_level': flood_level,
-        'batch_size': batch_size,
         'n_samples': n_samples,
         'dim_mode': dim_mode,
         'use_momentum': use_momentum,
@@ -148,16 +145,12 @@ if __name__ == "__main__":
     # Ensure single threaded execution for the demo
     torch.set_num_threads(1)
 
-    # Format: (Name, Momentum, Top-K, Batch Size)
+    # Format: (Name, Momentum, Top-K)
     settings_list = [
-        {"name": "Vanilla",             "mom": False, "topk": False, "batch": None},
-        {"name": "Top-K Only",          "mom": False, "topk": True,  "batch": None},
-        {"name": "Momentum Only",       "mom": True,  "topk": False, "batch": None},
-        {"name": "Top-K + Momentum",    "mom": True,  "topk": True, "batch": None},
-        {"name": "Mini-Batch Only",     "mom": False, "topk": False, "batch": default_config.demo_batch_size},
-        {"name": "Mini-Batch + Top-K",  "mom": False, "topk": True, "batch": default_config.demo_batch_size},
-        {"name": "Mini-Batch + Momentum","mom": True, "topk": False, "batch": default_config.demo_batch_size},
-        {"name": "Combined (All 3)",    "mom": True,  "topk": True,  "batch": default_config.demo_batch_size},
+        {"name": "Vanilla",             "mom": False, "topk": False},
+        {"name": "Top-K Only",          "mom": False, "topk": True},
+        {"name": "Momentum Only",       "mom": True,  "topk": False},
+        {"name": "Top-K + Momentum",    "mom": True,  "topk": True},
     ]
 
     for setting in settings_list:
@@ -173,8 +166,7 @@ if __name__ == "__main__":
             use_momentum=setting["mom"],
             use_top_k=setting["topk"], 
             use_flooding=default_config.demo_use_flooding,
-            flood_multiplier=default_config.demo_flood_multiplier, 
-            batch_size=setting["batch"]
+            flood_multiplier=default_config.demo_flood_multiplier
         )
 
         # Evaliation Scores
@@ -222,8 +214,6 @@ if __name__ == "__main__":
             param_suffix += f"_momStr{default_config.momentum_strength}_momDec{default_config.momentum_decay}"
         if setting['topk']:
             param_suffix += f"_topk{default_config.top_k}"
-        if setting['batch'] is not None:
-            param_suffix += f"_batch{setting['batch']}"
             
         safe_setting_name = setting['name'].replace(" ", "_").replace("(", "").replace(")", "")
 
