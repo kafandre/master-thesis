@@ -1,7 +1,7 @@
 import torch
 from torch.utils.data import random_split
 import numpy as np
-from data.NoisyData import NoisyData
+from data.SyntheticData import SyntheticData
 from data.RealData import RealData
 from models.ComponentwiseBoostingModel import ComponentwiseBoostingModel
 from config import config as default_config
@@ -18,16 +18,23 @@ def run_experiment(
     use_flooding,
     flood_multiplier,
     forced_flood_level=None,
-    specific_top_k=None
+    specific_top_k=None,
+    signal_type='linear_interaction',
+    feature_dist='normal',
+    noise_dist='normal',
+    learning_rate=None
 ):
     # --- 1. Train on CLEAN Data ---
     if default_config.DATASET_TYPE == 'synthetic':
-        dataset_clean = NoisyData(
+        dataset_clean = SyntheticData(
             n_samples=n_samples,
             dim_mode=dim_mode,
             noise_std=noise_std,
             seed=seed,
-            drift_type='none'
+            drift_type='none',
+            signal_type=signal_type,
+            feature_dist=feature_dist,
+            noise_dist=noise_dist
         )
     else:
         # For Real Data
@@ -67,11 +74,14 @@ def run_experiment(
     
     # deteremine top-k
     current_top_k = specific_top_k if specific_top_k is not None else default_config.top_k
+    
+    # determine LR
+    lr = learning_rate if learning_rate is not None else default_config.learning_rate
 
     # Init Model
     model = ComponentwiseBoostingModel(
         n_estimators=default_config.n_estimators,
-        learning_rate=default_config.learning_rate,
+        learning_rate=lr,
         base_learner=base_learner,
         poly_degree=default_config.poly_degree,
         tree_max_depth=default_config.tree_depth,
@@ -88,7 +98,7 @@ def run_experiment(
         eps_linear=default_config.eps_linear
     )
     
-    # Fit (Note: Inputs are already Tensors, model handles device)
+    # Fit
     model.fit(
         X_train, y_train,
         X_val, y_val,
@@ -100,32 +110,43 @@ def run_experiment(
     results = {}
     
     # Helper to evaluate
-    def get_mse(X, y):
-        # Use best model (virtual checkpoint)
-        pred = model.predict(X, use_best_model=True)
+    def get_mse(X, y, use_best):
+        pred = model.predict(X, use_best_model=use_best)
         return torch.mean((pred - y)**2).item()
 
-    # record vailadtion loss at best iteration
-    results['val_best'] = model.history['val_loss'][model.best_iteration_ - 1]
+    # record validation loss at best iteration
+    results['val_best'] = model.history['val_loss'][model.best_iteration_ - 1] if model.best_iteration_ > 0 else model.history['val_loss'][-1]
 
-    # A. Clean Test
-    results['clean'] = get_mse(X_test_clean, y_test_clean)
+    # A. Clean Test (Best & Last)
+    results['clean_best'] = get_mse(X_test_clean, y_test_clean, use_best=True)
+    results['clean_last'] = get_mse(X_test_clean, y_test_clean, use_best=False)
+    
+    # For backward compatibility with existing code that expects 'clean'
+    results['clean'] = results['clean_best']
     
     # B. Drift Scenarios (Synthetic Only)
     if default_config.DATASET_TYPE == 'synthetic':
         for d_type, d_mag in default_config.drift_scenarios:
-            ds_drift = NoisyData(
+            ds_drift = SyntheticData(
                 n_samples=n_samples,
                 dim_mode=dim_mode,
                 noise_std=noise_std,
                 seed=seed,
                 drift_type=d_type,
-                drift_magnitude=d_mag
+                drift_magnitude=d_mag,
+                signal_type=signal_type,
+                feature_dist=feature_dist,
+                noise_dist=noise_dist
             )
             X_test_drift = ds_drift.x[test_idx]
             y_test_drift = ds_drift.y[test_idx]
             
-            results[f"{d_type}_{d_mag}"] = get_mse(X_test_drift, y_test_drift)
+            # Record both Best and Last model performance on drift
+            results[f"{d_type}_{d_mag}_best"] = get_mse(X_test_drift, y_test_drift, use_best=True)
+            results[f"{d_type}_{d_mag}_last"] = get_mse(X_test_drift, y_test_drift, use_best=False)
+            
+            # For backward compatibility
+            results[f"{d_type}_{d_mag}"] = results[f"{d_type}_{d_mag}_best"]
         
     return {
         'model_obj': model, 
@@ -141,9 +162,14 @@ def run_experiment(
 
 if __name__ == "__main__":
     plt.ion()
-    
-    # Ensure single threaded execution for the demo
     torch.set_num_threads(1)
+
+    # DEMO
+    scenario_name = default_config.demo_scenario
+    scen_params = default_config.SCENARIOS[scenario_name]
+    
+    print(f"Running Demo on Scenario: {scenario_name}")
+    print(f"Params: {scen_params}")
 
     # Format: (Name, Momentum, Top-K)
     settings_list = [
@@ -159,14 +185,17 @@ if __name__ == "__main__":
         # 1. Run the experiment
         res = run_experiment(
             seed=default_config.demo_seed, 
-            dim_mode=default_config.demo_dim_mode, 
-            n_samples=default_config.demo_n_samples, 
-            noise_std=default_config.demo_noise_std, 
+            dim_mode=scen_params['dim'], 
+            n_samples=scen_params['n_samples'], 
+            noise_std=scen_params['noise_std'], 
             base_learner=default_config.demo_base_learner, 
             use_momentum=setting["mom"],
             use_top_k=setting["topk"], 
             use_flooding=default_config.demo_use_flooding,
-            flood_multiplier=default_config.demo_flood_multiplier
+            flood_multiplier=default_config.demo_flood_multiplier,
+            signal_type=scen_params['signal_type'],
+            feature_dist=scen_params['feature_dist'],
+            noise_dist=scen_params['noise_dist']
         )
 
         # Evaliation Scores
@@ -197,54 +226,17 @@ if __name__ == "__main__":
         plt.axhline(y=flood_level, color='black', linestyle='--', linewidth=2, label=f'Flood Level ({flood_level:.3f})')
         
         plt.subplots_adjust(right=0.70) 
+        plt.text(1.05, 0.5, score_text, transform=plt.gca().transAxes, fontsize=10, 
+                verticalalignment='center', bbox=dict(boxstyle="round,pad=0.5", facecolor='white', alpha=0.9, edgecolor='gray'))
+
+        safe_setting_name = setting['name'].replace(" ", "_").replace("(", "").replace(")", "")
         
-        plt.text(
-            1.05, 0.5,                  
-            score_text,                 
-            transform=plt.gca().transAxes, 
-            fontsize=10, 
-            verticalalignment='center',
-            bbox=dict(boxstyle="round,pad=0.5", facecolor='white', alpha=0.9, edgecolor='gray')
+        plot_title = (
+            f"{setting['name']} | {default_config.demo_base_learner} | {scenario_name}\n"
+            f"Flood x{default_config.demo_flood_multiplier} (Lvl: {flood_level:.3f})"
         )
-
-        safe_setting_name = setting['name'].replace(" ", "_").replace("(", "").replace(")", "")
         
-        param_suffix = ""
-        if setting['mom']:
-            param_suffix += f"_momStr{default_config.momentum_strength}_momDec{default_config.momentum_decay}"
-        if setting['topk']:
-            param_suffix += f"_topk{default_config.top_k}"
-            
-        safe_setting_name = setting['name'].replace(" ", "_").replace("(", "").replace(")", "")
-
-        if default_config.DATASET_TYPE == 'real':
-            plot_title = (
-                f"{setting['name']} | {default_config.demo_base_learner}\n"
-                f"Dataset: {default_config.DATASET_NAME} | "
-                f"Flood x{default_config.demo_flood_multiplier} (Lvl: {flood_level:.3f})"
-            )
-            filename = (
-                f"Plot_{safe_setting_name}_"
-                f"{default_config.demo_base_learner}_"
-                f"{default_config.DATASET_NAME}"
-                f"{param_suffix}_"
-                f"floodMul{default_config.demo_flood_multiplier}.png"
-            )
-        else:
-            plot_title = (
-                f"{setting['name']} | {default_config.demo_base_learner}\n"
-                f"N={default_config.demo_n_samples} ({default_config.demo_dim_mode}) | "
-                f"Noise={default_config.demo_noise_std} | "
-                f"Flood x{default_config.demo_flood_multiplier} (Lvl: {flood_level:.3f})"
-            )
-            filename = (
-                f"Plot_{safe_setting_name}_"
-                f"{default_config.demo_base_learner}_"
-                f"n{default_config.demo_n_samples}_{default_config.demo_dim_mode}_"
-                f"noise{default_config.demo_noise_std}"
-                f"{param_suffix}_"
-                f"floodMul{default_config.demo_flood_multiplier}.png"
-            )
+        filename = f"Plot_Demo_{scenario_name}_{safe_setting_name}.png"
 
         plt.xlabel('Boosting Iterations')
         plt.ylabel('MSE Loss')
