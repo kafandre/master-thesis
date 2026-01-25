@@ -22,7 +22,6 @@ class ComponentwiseBoostingModel:
         top_k: int = 5,
         momentum_decay: float = 0.9,
         momentum_strength: float = 1.0,
-        batch_size: Optional[int] = None,
         random_state: Optional[int] = None,
         eps_momentum: float = 1e-6,
         eps_linear: float = 1e-8
@@ -48,7 +47,6 @@ class ComponentwiseBoostingModel:
         self.top_k = top_k
         self.momentum_decay = momentum_decay
         self.momentum_strength = momentum_strength
-        self.batch_size = int(batch_size) if batch_size is not None else None
         
         self.random_state = random_state
         if random_state is not None:
@@ -121,40 +119,40 @@ class ComponentwiseBoostingModel:
 
     # Vectorized Solvers
 
-    def _solve_linear_vectorized(self, X_batch, target):
+    def _solve_linear_vectorized(self, X, target):
         """
         Solves y = beta * x for all features simultaneously
         """
 
-        # X_batch: (B, F)
+        # X: (B, F)
         # target: (B, ) -> (B, 1)
         target = target.unsqueeze(1)
         
         # Numerator: X^T * y -> (F, B) @ (B, 1) -> (F, 1) -> (F,)
-        numer = (X_batch * target).sum(dim=0)
+        numer = (X * target).sum(dim=0)
         
         # Denom: X^T * X -> Diagonal only since we solve per feature independently
-        denom = (X_batch ** 2).sum(dim=0)
+        denom = (X ** 2).sum(dim=0)
         
         beta = numer / (denom + self.eps_linear) # shape (F,)
         
         # Compute MSE for each feature
         # Preds: X * beta -> (B, F) * (F,) no broadcast
         # we need prediction for feature i using beta i
-        preds = X_batch * beta.unsqueeze(0) # (B, F)
+        preds = X * beta.unsqueeze(0) # (B, F)
         
         losses = ((preds - target)**2).mean(dim=0) # (F,)
         
         return beta, losses
 
-    def _solve_poly_vectorized(self, X_batch, target):
+    def _solve_poly_vectorized(self, X, target):
         """
         Solves Polynomial Regression for all features simultaneously.
         Matches original logic: Includes Intercept (via LinearRegression default).
         Form: y = b0 + b1*x + b2*x^2 ...
         """
-        n_samples, n_features = X_batch.shape
-        device = X_batch.device
+        n_samples, n_features = X.shape
+        device = X.device
         
         # 1. Construct Design Matrices for all features
         # We want [1, x, x^2] for every feature.
@@ -163,8 +161,8 @@ class ComponentwiseBoostingModel:
         # Powers: 1 to degree
         exponents = torch.arange(1, self.poly_degree + 1, device=device).float()
         
-        # X_batch unsqueezed: (N, F, 1)
-        X_expanded = X_batch.unsqueeze(-1)
+        # X unsqueezed: (N, F, 1)
+        X_expanded = X.unsqueeze(-1)
         
         # Feature powers: (N, F, degree)
         # Note: Depending on memory, this can be large.
@@ -282,19 +280,19 @@ class ComponentwiseBoostingModel:
         
         return gain, neg_gain_per_feat
 
-    def _solve_bspline_vectorized(self, X_batch, target):
+    def _solve_bspline_vectorized(self, X, target):
         """
         Solves B-Spline Regression for all features simultaneously.
         Reuse the design matrix -> Normal Equations logic from Polynomial.
         """
-        n_samples, n_features = X_batch.shape
-        device = X_batch.device
+        n_samples, n_features = X.shape
+        device = X.device
         
         # Number of basis functions = n_knots + degree + 1 (usually, depending on def)
         
         # loop over features to build the big tensor
         
-        X_np = X_batch.detach().cpu().numpy()
+        X_np = X.detach().cpu().numpy()
         basis_matrices = []
         
         for f_idx in range(n_features):
@@ -436,20 +434,7 @@ class ComponentwiseBoostingModel:
 
         for i in range(self.n_estimators):        
             
-            # Mini-batch sampling
-            if self.batch_size is not None and self.batch_size < n_samples:
-                batch_idx = torch.randperm(n_samples)[:self.batch_size]
-                X_batch = X_train[batch_idx]
-                y_batch = y_train[batch_idx]
-                curr_pred_batch = curr_pred_train[batch_idx]
-            else:
-                X_batch = X_train
-                y_batch = y_train
-                curr_pred_batch = curr_pred_train
-                if X_train_binned is not None:
-                    X_batch_binned = X_train_binned                
-
-            grad = self._get_gradient(curr_pred_batch, y_batch)
+            grad = self._get_gradient(curr_pred_train, y_train)
             target = -grad
 
             # --- OPTIMIZED FEATURE SELECTION ---
@@ -459,18 +444,18 @@ class ComponentwiseBoostingModel:
             best_model_obj = None # Only for trees
             
             if self.base_learner == "linear":
-                betas, losses = self._solve_linear_vectorized(X_batch, target)
+                betas, losses = self._solve_linear_vectorized(X_train, target)
                 best_idx = self._select_feature(losses)
                 best_params = betas[best_idx] # Tensor
                 
             elif self.base_learner == "polynomial":
-                betas, losses = self._solve_poly_vectorized(X_batch, target)
+                betas, losses = self._solve_poly_vectorized(X_train, target)
                 best_idx = self._select_feature(losses)
                 best_params = betas[best_idx] # Tensor (coefficients)
                 
             elif self.base_learner == "bspline":
                 # Returns betas (F, n_basis) and losses (F,)
-                betas, losses = self._solve_bspline_vectorized(X_batch, target)
+                betas, losses = self._solve_bspline_vectorized(X_train, target)
                 best_idx = self._select_feature(losses)
                 # Store coeffs AND the knots used for this feature
                 best_params = {
@@ -479,7 +464,7 @@ class ComponentwiseBoostingModel:
                 }
                 
             elif self.base_learner == "tree":
-                gains, losses = self._solve_tree_vectorized(X_batch_binned, target, self.all_bin_edges)
+                gains, losses = self._solve_tree_vectorized(X_train_binned, target, self.all_bin_edges)
                 
                 best_idx = self._select_feature(losses)
                 
@@ -496,7 +481,7 @@ class ComponentwiseBoostingModel:
                 # We need the values S_L, N_L, etc., which we computed inside the solver.
                 # To keep code clean, let's just re-compute the leaf means for the WINNER feature only.
                 
-                f_binned = X_batch_binned[:, best_idx]
+                f_binned = X_train_binned[:, best_idx]
                 mask_left = f_binned <= best_bin_idx
                 
                 # Compute leaf values

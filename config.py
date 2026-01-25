@@ -1,6 +1,6 @@
 class config:
-    SEED = 200
-    n_seeds = 30 
+    SEED = 300
+    n_seeds = 1
     
     # --- Dataset Configuration ---
     # Options: "synthetic" or "real"
@@ -34,9 +34,6 @@ class config:
     momentum_strength = 10.0
 
     flood_level = None
-
-    # Batch size for mini-batch processing
-    batch_size = None
     
     # Experiment Config
     n_estimators = 1000
@@ -64,5 +61,4 @@ class config:
     demo_noise_std = 5.0
     demo_base_learner = "linear"
     demo_flood_multiplier = 1.0
-    demo_batch_size = 100
     demo_use_flooding = False

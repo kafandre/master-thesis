@@ -16,7 +16,7 @@ from joblib import Parallel, delayed
 from filelock import FileLock 
 
 # --- Setup Directories ---
-RESULTS_DIR = "results6"
+RESULTS_DIR = "results7"
 HISTORY_DIR = os.path.join(RESULTS_DIR, "histories")
 PLOTS_DIR = os.path.join(RESULTS_DIR, "plots")
 SUMMARY_FILE = os.path.join(RESULTS_DIR, "grid_summary.csv")
@@ -147,7 +147,6 @@ def run_single_wrapper(params):
                 use_top_k=params['topk'],
                 use_flooding=False,
                 flood_multiplier=0.0,
-                batch_size=None,
                 forced_flood_level=None,
                 specific_top_k=params['top_k_int']
             )
@@ -208,7 +207,6 @@ def run_single_wrapper(params):
                     use_top_k=params['topk'],
                     use_flooding=True,
                     flood_multiplier=0.0, 
-                    batch_size=None,
                     forced_flood_level=target_flood_level,
                     specific_top_k=params['top_k_int']
                 )
