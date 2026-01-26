@@ -11,12 +11,12 @@ from config import config
 import sys
 import datetime
 import random 
-import torch  # Added import
+import torch
 from joblib import Parallel, delayed 
 from filelock import FileLock 
 
 # --- Setup Directories ---
-RESULTS_DIR = "results7"
+RESULTS_DIR = "results8"
 HISTORY_DIR = os.path.join(RESULTS_DIR, "histories")
 PLOTS_DIR = os.path.join(RESULTS_DIR, "plots")
 SUMMARY_FILE = os.path.join(RESULTS_DIR, "grid_summary.csv")
@@ -62,20 +62,18 @@ method_configs = [
 
 def get_run_signature(params):
     sig = (
-        f"{params['base_learner']}_d{params['dim']}_n{params['n_samples']}_"
-        f"ns{params['noise_std']}_{params['method']}_"
-        f"s{params['seed']}_flood{params['use_flooding']}"
+        f"{params['scenario']}_{params['base_learner']}_"
+        f"{params['method']}_s{params['seed']}_flood{params['use_flooding']}"
     )
     return sig.replace(" ", "")
 
 def get_filename_base(params, flood_level_val=None):
     name = (
-        f"{params['method'].replace(' ', '')}_{params['base_learner']}_"
-        f"n{params['n_samples']}_d{params['dim']}_"
-        f"noise{params['noise_std']}_seed{params['seed']}"
+        f"{params['scenario']}_{params['method'].replace(' ', '')}_"
+        f"{params['base_learner']}_seed{params['seed']}"
     )
     if params['mom']:
-        name += f"_momStr{config.momentum_strength}_momDec{config.momentum_decay}"
+        name += f"_momStr{config.momentum_strength}"
     if params['topk']:
         name += f"_topk{params['top_k_int']}"
     if params['use_flooding'] and flood_level_val is not None:
@@ -93,7 +91,7 @@ def save_plot(history, flood_level, params, filename_base):
     if params['use_flooding']:
         plt.axhline(y=flood_level, color='black', linestyle='--', label=f'Flood {flood_level:.4f}')
 
-    plt.title(f"{params['method']} | Seed {params['seed']} | Flood: {params['use_flooding']}")
+    plt.title(f"{params['scenario']} | {params['base_learner']} | {params['method']} | Seed {params['seed']}")
     plt.xlabel("Iteration")
     plt.ylabel("MSE")
     plt.legend()
@@ -110,7 +108,6 @@ def save_results_to_csv(row_dict):
 
 def run_single_wrapper(params):
     # CRITICAL CPU OPTIMIZATION
-    # Prevents over-subscription when running multiple processes
     torch.set_num_threads(1) 
     
     lock_path = os.path.join(RESULTS_DIR, "grid_summary.csv.lock")
@@ -148,7 +145,11 @@ def run_single_wrapper(params):
                 use_flooding=False,
                 flood_multiplier=0.0,
                 forced_flood_level=None,
-                specific_top_k=params['top_k_int']
+                specific_top_k=params['top_k_int'],
+                signal_type=params['signal_type'],
+                feature_dist=params['feature_dist'],
+                noise_dist=params['noise_dist'],
+                learning_rate=params['lr']
             )
             clean_history = res_clean['history']
             min_train_loss = min(clean_history['train_loss'])
@@ -162,11 +163,12 @@ def run_single_wrapper(params):
                 'signature': get_run_signature(clean_params),
                 'flood_level': 0.0,
                 'best_iter': res_clean['best_iter'],
-                'mse_clean': res_clean['scores']['clean'],
+                'mse_clean': res_clean['scores']['clean_best'],
+                'mse_clean_last': res_clean['scores']['clean_last'],
                 'val_best': res_clean['scores']['val_best'],
             })
             for k, v in res_clean['scores'].items():
-                if k not in ['clean', 'val_best']:
+                if k not in ['clean', 'clean_best', 'clean_last', 'val_best']:
                     row[f"mse_{k}"] = v
             
             with local_csv_lock:
@@ -208,7 +210,11 @@ def run_single_wrapper(params):
                     use_flooding=True,
                     flood_multiplier=0.0, 
                     forced_flood_level=target_flood_level,
-                    specific_top_k=params['top_k_int']
+                    specific_top_k=params['top_k_int'],
+                    signal_type=params['signal_type'],
+                    feature_dist=params['feature_dist'],
+                    noise_dist=params['noise_dist'],
+                    learning_rate=params['lr']
                 )
                 
                 # Save History
@@ -224,11 +230,12 @@ def run_single_wrapper(params):
                     'signature': get_run_signature(flood_params),
                     'flood_level': target_flood_level,
                     'best_iter': res_flood['best_iter'],
-                    'mse_clean': res_flood['scores']['clean'],
+                    'mse_clean': res_flood['scores']['clean_best'],
+                    'mse_clean_last': res_flood['scores']['clean_last'],
                     'val_best': res_flood['scores']['val_best'],
                 })
                 for k, v in res_flood['scores'].items():
-                    if k not in ['clean', 'val_best']:
+                    if k not in ['clean', 'clean_best', 'clean_last', 'val_best']:
                         row[f"mse_{k}"] = v
                 
                 with local_csv_lock:
@@ -241,52 +248,51 @@ def run_single_wrapper(params):
 if __name__ == "__main__":
 
     total_iterations_est = (
-        len(config.base_learners) * len(config.dims) * len(config.sizes) * len(config.noise_levels) * len(method_configs) * config.n_seeds
+        len(config.SCENARIOS) * len(config.base_learners) * len(method_configs) * config.n_seeds
     )
 
-    print(f"Preparing Parallel Grid Search. Approx Combinations: {total_iterations_est}")
+    print(f"Preparing Parallel Sensitivity Analysis. Approx Combinations: {total_iterations_est}")
     print(f"Resuming is supported: Existing 'Hist_*.pkl' files will be skipped.")
 
-    # 1. Generate ALL combinations into a list first
-    # This replaces the nested loops so we can pass them to the parallel workers
     all_jobs = []
     
-    for base_learner in config.base_learners:
-        for dim in config.dims:
-            # Skip 200 dimensions for tree learner
-            if base_learner == "tree" and dim == 200:
-                continue
-            for size in config.sizes:
-                for noise in config.noise_levels:
-                    for method_conf in method_configs:
-                        for seed_offset in range(config.n_seeds):
-                            seed = config.SEED + seed_offset
-                            
-                            # --- Dynamic Top-K Logic ---
-                            actual_k = 3 if dim == 5 else 5
+    # Iterate over Scenarios
+    for scenario_name, scen_params in config.SCENARIOS.items():
+        for base_learner in config.base_learners:
+            
+            # Lookup tuned learning rate
+            current_lr = config.TUNED_LRS[scenario_name].get(base_learner, config.learning_rate)
+            
+            for method_conf in method_configs:
+                for seed_offset in range(config.n_seeds):
+                    seed = config.SEED + seed_offset
+                    
+                    actual_k = config.top_k
 
-                            # Pack everything into a dictionary to send to the worker
-                            params = {
-                                'base_learner': base_learner,
-                                'dim': dim,
-                                'n_samples': size,
-                                'noise_std': noise,
-                                'seed': seed,
-                                'method': method_conf['name'],
-                                'mom': method_conf['mom'],
-                                'topk': method_conf['topk'],
-                                'top_k_int': actual_k,
-                                'use_flooding': False # Start with clean run logic
-                            }
-                            all_jobs.append(params)
+                    params = {
+                        'scenario': scenario_name,
+                        'base_learner': base_learner,
+                        'dim': scen_params['dim'],
+                        'n_samples': scen_params['n_samples'],
+                        'noise_std': scen_params['noise_std'],
+                        'signal_type': scen_params['signal_type'],
+                        'feature_dist': scen_params['feature_dist'],
+                        'noise_dist': scen_params['noise_dist'],
+                        'lr': current_lr,
+                        'seed': seed,
+                        'method': method_conf['name'],
+                        'mom': method_conf['mom'],
+                        'topk': method_conf['topk'],
+                        'top_k_int': actual_k,
+                        'use_flooding': False
+                    }
+                    all_jobs.append(params)
 
     print(f"Dispatched {len(all_jobs)} jobs to workers.")
     print("Starting execution using n_jobs=-2 (All CPUs minus 1)...")
     
-    # We rely on joblib for multi-processing.
-    # Inside each process, torch.set_num_threads(1) prevents thread contention.
     Parallel(n_jobs=-2, verbose=10, batch_size=1)(
         delayed(run_single_wrapper)(p) for p in all_jobs
     )
 
-    print("Grid Search Complete.")
+    print("Sensitivity Analysis Complete.")
