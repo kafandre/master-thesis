@@ -12,7 +12,7 @@ class ComponentwiseBoostingModel:
         base_learner: str = "polynomial",
         poly_degree: int = 2,
         tree_max_depth: int = 2,
-        n_bins: int = 32,
+        n_bins: int = 256,
         spline_degree: int = 2,
         n_knots: int = 10,
         loss: str = 'mse', # 'mse' or 'flooding'
@@ -280,59 +280,43 @@ class ComponentwiseBoostingModel:
         
         return gain, neg_gain_per_feat
 
-    def _solve_bspline_vectorized(self, X, target):
+    def _solve_bspline_vectorized(self, A, target):
         """
         Solves B-Spline Regression for all features simultaneously.
         Reuse the design matrix -> Normal Equations logic from Polynomial.
         """
-        n_samples, n_features = X.shape
-        device = X.device
+        n_features, n_samples, n_basis = A.shape
+        device = A.device
         
-        # Number of basis functions = n_knots + degree + 1 (usually, depending on def)
-        
-        # loop over features to build the big tensor
-        
-        X_np = X.detach().cpu().numpy()
-        basis_matrices = []
-        
-        for f_idx in range(n_features):
-            knots = self.feature_knots_[f_idx]
-            
-            # Clip input to knot range to prevent OutOfBounds errors
-            x_col = np.clip(X_np[:, f_idx], knots[0], knots[-1])
-            
-            # Design matrix (N, n_basis)
-            # BSpline.design_matrix returns a CSR matrix or dense depending on version/input
-            dm = BSpline.design_matrix(x_col, knots, self.spline_degree)
-            if not isinstance(dm, np.ndarray):
-                dm = dm.toarray()
-            basis_matrices.append(dm)
-            
-        # Stack to (F, N, n_basis)
-        A_np = np.stack(basis_matrices, axis=0) 
-        A = torch.from_numpy(A_np).float().to(device)
-        
-        n_basis = A.shape[2]
-        
-        # Target Y: (F, N, 1)
+        # Target Y: (F, N, 1) -> same target for all features
         Y = target.view(1, n_samples, 1).expand(n_features, n_samples, 1)
         
         # Solve Normal Equations: (A^T A) beta = A^T Y
+        # A_T: (F, n_basis, N)
         A_T = A.transpose(1, 2)
+        
+        # ATA: (F, n_basis, n_basis)
         ATA = torch.bmm(A_T, A)
+        
+        # ATY: (F, n_basis, 1)
         ATY = torch.bmm(A_T, Y)
         
-        # Regularization
+        # Regularization for stability
         I = torch.eye(n_basis, device=device).unsqueeze(0).expand(n_features, -1, -1)
         ATA_reg = ATA + self.eps_linear * I
         
         # Solve
+        # beta shape: (F, n_basis, 1)
         beta = torch.linalg.solve(ATA_reg, ATY)
         
         # Compute Losses
+        # Preds = A @ beta -> (F, N, n_basis) @ (F, n_basis, 1) -> (F, N, 1)
         preds = torch.bmm(A, beta).squeeze(-1) # (F, N)
-        target_rep = target.unsqueeze(0)
-        losses = ((preds - target_rep)**2).mean(dim=1)
+        
+        # Target is (N,)
+        target_rep = target.unsqueeze(0) # (1, N)
+        
+        losses = ((preds - target_rep)**2).mean(dim=1) # (F,)
         
         return beta.squeeze(-1), losses
 
@@ -393,7 +377,30 @@ class ComponentwiseBoostingModel:
                                     [f_max]*(self.spline_degree)))
                 
                 self.feature_knots_[f_idx] = t
-        
+
+        # Pre-compute Design Matrices for B-Spline ---
+        A_bspline = None
+        if self.base_learner == "bspline":
+            X_np = X_train.detach().cpu().numpy()
+            basis_matrices = []
+            
+            for f_idx in range(n_features):
+                # Retrieve the knots we just calculated
+                knots = self.feature_knots_[f_idx]
+                
+                # Clip input to knot range
+                x_col = np.clip(X_np[:, f_idx], knots[0], knots[-1])
+                
+                # Construct Design Matrix ONCE
+                dm = BSpline.design_matrix(x_col, knots, self.spline_degree)
+                if not isinstance(dm, np.ndarray):
+                    dm = dm.toarray()
+                basis_matrices.append(dm)
+            
+            # Stack into a single tensor: (F, N, n_basis)
+            A_np = np.stack(basis_matrices, axis=0)
+            A_bspline = torch.from_numpy(A_np).float().to(X_train.device)
+
         # --- NEW: Pre-compute Bins for Trees ---
         X_train_binned = None
         self.bin_edges_ = {}
@@ -455,7 +462,7 @@ class ComponentwiseBoostingModel:
                 
             elif self.base_learner == "bspline":
                 # Returns betas (F, n_basis) and losses (F,)
-                betas, losses = self._solve_bspline_vectorized(X_train, target)
+                betas, losses = self._solve_bspline_vectorized(A_bspline, target)
                 best_idx = self._select_feature(losses)
                 # Store coeffs AND the knots used for this feature
                 best_params = {
