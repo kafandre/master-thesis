@@ -5,7 +5,7 @@ import numpy as np
 class SyntheticData(Dataset):
     def __init__(self, n_samples=100, dim_mode=5, noise_std=1.0,
                 seed=None, drift_type='none', drift_magnitude='weak',
-                signal_type='linear_interaction', feature_dist='normal', noise_dist='normal'):
+                signal_type='simple_additive', feature_dist='normal', noise_dist='normal'):
         
         if seed is not None:
             torch.manual_seed(seed)
@@ -68,28 +68,40 @@ class SyntheticData(Dataset):
             raise ValueError(f"Unknown feature_dist: {dist_type}")
 
     def _generate_signal(self, signal_type):
-        if signal_type == 'linear_interaction':
-            # Original signal: y = 3x0 + 3x1 - 3x2 + 2x0x1
-            return (self.coef_meaningful * self.x[:, 0] + 
-                    self.coef_meaningful * self.x[:, 1] - 
-                    self.coef_meaningful * self.x[:, 2] +
-                    self.coef_interaction * self.x[:, 0] * self.x[:, 1])
+        # if signal_type == 'linear_interaction':
+        #     # Original signal: y = 3x0 + 3x1 - 3x2 + 2x0x1
+        #     return (self.coef_meaningful * self.x[:, 0] + 
+        #             self.coef_meaningful * self.x[:, 1] - 
+        #             self.coef_meaningful * self.x[:, 2] +
+        #             self.coef_interaction * self.x[:, 0] * self.x[:, 1])
         
-        elif signal_type == 'friedman':
-            # Friedman #1: y = 10sin(pi*x0*x1) + 20(x2 - 0.5)^2 + 10x3 + 5x4
-            # We apply this to the input features (usually N(0,1))
-            return (10 * torch.sin(np.pi * self.x[:, 0] * self.x[:, 1]) +
-                    20 * (self.x[:, 2] - 0.5)**2 +
-                    10 * self.x[:, 3] +
-                    5 * self.x[:, 4])
+        if signal_type == 'simple_additive':
+            # The New Baseline
+            # y = 3x0 + 2x1^2 - 3x2
+            # Perfect for CWB. Tests basic additive fit.
+            return (self.coef_meaningful * self.x[:, 0] + 
+                    2.0 * self.x[:, 1]**2 - 
+                    self.coef_meaningful * self.x[:, 2])
+
+        # --- 2. FAVOR POLY: Smooth Quadratic ---
+        # Polynomial (deg=2) fits this perfectly. 
+        elif signal_type == 'smooth_quadratic':
+            return (self.x[:, 0]**2 + 
+                    self.x[:, 1]**2 - 
+                    self.x[:, 2]**2)
+
+        # --- 4. FAVOR BSPLINES: High Frequency ---
+        # y = 10sin(3*pi*x0) + 5x1
+        # 3*pi is fast enough that a simple quadratic poly cannot fit it.
+        # Requires local basis functions (Splines/Trees).
+        elif signal_type == 'high_freq':
+            return (10.0 * torch.sin(3.0 * np.pi * self.x[:, 0]) + 
+                    5.0 * self.x[:, 1])
         
         elif signal_type == 'step':
-            # Discontinuous step function
-            # 5 if x > 0 else 0 (Centered)
-            return (5.0 * (self.x[:, 0] > 0).float() + 
-                    5.0 * (self.x[:, 1] > 0).float() - 
-                    5.0 * (self.x[:, 2] > 0).float() +
-                    3.0 * (self.x[:, 0] > 0).float() * (self.x[:, 1] > 0).float()) # Interaction step
+            return (5.0 * torch.sign(torch.sin(2.5 * self.x[:, 0])) + 
+                    5.0 * torch.sign(torch.sin(2.5 * self.x[:, 1])) - 
+                    5.0 * torch.sign(torch.sin(2.5 * self.x[:, 2])))
             
         else:
             raise ValueError(f"Unknown signal_type: {signal_type}")
