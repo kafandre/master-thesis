@@ -88,6 +88,8 @@ def run_experiment(
         poly_degree=default_config.poly_degree,
         tree_max_depth=default_config.tree_depth,
         n_bins=default_config.n_bins,
+        spline_degree=default_config.spline_degree,
+        n_knots=default_config.n_knots,
         loss='flooding' if use_flooding else 'mse',
         flood_level=flood_level,
         use_momentum=use_momentum,
