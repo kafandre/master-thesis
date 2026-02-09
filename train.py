@@ -20,6 +20,7 @@ def run_experiment(
     forced_flood_level=None,
     specific_top_k=None,
     signal_type='linear_interaction',
+    signal_scale=1.0,
     feature_dist='normal',
     noise_dist='normal',
     learning_rate=None
@@ -33,6 +34,7 @@ def run_experiment(
             seed=seed,
             drift_type='none',
             signal_type=signal_type,
+            signal_scale=signal_scale,
             feature_dist=feature_dist,
             noise_dist=noise_dist
         )
@@ -135,6 +137,7 @@ def run_experiment(
                 drift_type=d_type,
                 drift_magnitude=d_mag,
                 signal_type=signal_type,
+                signal_scale=signal_scale,
                 feature_dist=feature_dist,
                 noise_dist=noise_dist
             )
@@ -194,6 +197,7 @@ if __name__ == "__main__":
             use_flooding=default_config.demo_use_flooding,
             flood_multiplier=default_config.demo_flood_multiplier,
             signal_type=scen_params['signal_type'],
+            signal_scale=scen_params['signal_scale'],
             feature_dist=scen_params['feature_dist'],
             noise_dist=scen_params['noise_dist']
         )
