@@ -16,7 +16,7 @@ from joblib import Parallel, delayed
 from filelock import FileLock 
 
 # --- Setup Directories ---
-RESULTS_DIR = "results8"
+RESULTS_DIR = "results_test24"
 HISTORY_DIR = os.path.join(RESULTS_DIR, "histories")
 PLOTS_DIR = os.path.join(RESULTS_DIR, "plots")
 SUMMARY_FILE = os.path.join(RESULTS_DIR, "grid_summary.csv")
@@ -69,8 +69,7 @@ def get_run_signature(params):
 
 def get_filename_base(params, flood_level_val=None):
     name = (
-        f"{params['scenario']}_{params['method'].replace(' ', '')}_"
-        f"{params['base_learner']}_seed{params['seed']}"
+        f"{params['scenario']}_{params['base_learner']}_{params['method'].replace(' ', '')}_seed{params['seed']}"
     )
     if params['mom']:
         name += f"_momStr{config.momentum_strength}"
@@ -147,6 +146,7 @@ def run_single_wrapper(params):
                 forced_flood_level=None,
                 specific_top_k=params['top_k_int'],
                 signal_type=params['signal_type'],
+                signal_scale=params['signal_scale'],
                 feature_dist=params['feature_dist'],
                 noise_dist=params['noise_dist'],
                 learning_rate=params['lr']
@@ -182,15 +182,33 @@ def run_single_wrapper(params):
 
     # --- 2. FLOODING RUN SETUP ---
     if min_train_loss is not None:
-        best_val_idx = np.argmin(clean_history['val_loss'])
-        target_idx = min(best_val_idx + 50, len(clean_history['train_loss']) - 1)
-        target_flood_level = clean_history['train_loss'][target_idx]
-
-        target_flood_level = max(target_flood_level, params['noise_std'])
-
-        if min_train_loss > 0.95 * target_flood_level:
-            target_flood_level = min_train_loss + target_flood_level * 0.05
+        val_losses = clean_history['val_loss']
+        train_losses = clean_history['train_loss']
         
+        # 1. Find min val loss and its index
+        best_val_idx = np.argmin(val_losses)
+        min_val_loss = val_losses[best_val_idx]
+        
+        # 2. Find where val loss first rises to 1.05 * min_val_loss (after the minimum)
+        threshold = min_val_loss * 1.05
+        crossing_idx = len(val_losses) - 1  # Default to last iteration if threshold is never met
+        
+        for i in range(best_val_idx, len(val_losses)):
+            if val_losses[i] >= threshold:
+                crossing_idx = i
+                break
+        
+        # 3. Add 100 iterations from that point (clamping to max iterations)
+        target_idx = min(crossing_idx + 100, len(train_losses) - 1)
+        
+        # 4. Use the training loss at that index
+        candidate_flood_level = train_losses[target_idx]
+        
+        # 5. Apply Lower Bound (min_train_loss * 1.1)
+        lower_bound = min_train_loss * 1.1
+        target_flood_level = max(candidate_flood_level, lower_bound)
+
+        # Proceed with flooding setup...
         flood_params = params.copy()
         flood_params['use_flooding'] = True
         
@@ -212,6 +230,7 @@ def run_single_wrapper(params):
                     forced_flood_level=target_flood_level,
                     specific_top_k=params['top_k_int'],
                     signal_type=params['signal_type'],
+                    signal_scale=params['signal_scale'],
                     feature_dist=params['feature_dist'],
                     noise_dist=params['noise_dist'],
                     learning_rate=params['lr']
@@ -276,6 +295,7 @@ if __name__ == "__main__":
                         'n_samples': scen_params['n_samples'],
                         'noise_std': scen_params['noise_std'],
                         'signal_type': scen_params['signal_type'],
+                        'signal_scale': scen_params['signal_scale'],                        
                         'feature_dist': scen_params['feature_dist'],
                         'noise_dist': scen_params['noise_dist'],
                         'lr': current_lr,
