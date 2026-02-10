@@ -16,7 +16,7 @@ from joblib import Parallel, delayed
 from filelock import FileLock 
 
 # --- Setup Directories ---
-RESULTS_DIR = "results_test24"
+RESULTS_DIR = "results_test39"
 HISTORY_DIR = os.path.join(RESULTS_DIR, "histories")
 PLOTS_DIR = os.path.join(RESULTS_DIR, "plots")
 SUMMARY_FILE = os.path.join(RESULTS_DIR, "grid_summary.csv")
@@ -53,9 +53,9 @@ sys.stderr = sys.stdout
 # --- Configuration Generation ---
 method_configs = [
     {"name": "Vanilla",             "mom": False, "topk": False},
-    {"name": "TopK",                "mom": False, "topk": True},
+    # {"name": "TopK",                "mom": False, "topk": True},
     {"name": "Momentum",            "mom": True,  "topk": False},
-    {"name": "TopK+Momentum",       "mom": True,  "topk": True},
+    # {"name": "TopK+Momentum",       "mom": True,  "topk": True},
 ]
 
 # --- Helper Functions ---
@@ -189,12 +189,12 @@ def run_single_wrapper(params):
         best_val_idx = np.argmin(val_losses)
         min_val_loss = val_losses[best_val_idx]
         
-        # 2. Find where val loss first rises to 1.05 * min_val_loss (after the minimum)
-        threshold = min_val_loss * 1.05
-        crossing_idx = len(val_losses) - 1  # Default to last iteration if threshold is never met
+        # 2. Find where val loss first falls below 1.025 * min_val_loss
+        threshold = min_val_loss * 1.025
+        crossing_idx = best_val_idx  # Default to best index if not found earlier
         
-        for i in range(best_val_idx, len(val_losses)):
-            if val_losses[i] >= threshold:
+        for i in range(len(val_losses)):
+            if val_losses[i] < threshold:
                 crossing_idx = i
                 break
         
@@ -205,7 +205,7 @@ def run_single_wrapper(params):
         candidate_flood_level = train_losses[target_idx]
         
         # 5. Apply Lower Bound (min_train_loss * 1.1)
-        lower_bound = min_train_loss * 1.1
+        lower_bound = min_train_loss * 1.05
         target_flood_level = max(candidate_flood_level, lower_bound)
 
         # Proceed with flooding setup...
@@ -278,7 +278,15 @@ if __name__ == "__main__":
     # Iterate over Scenarios
     for scenario_name, scen_params in config.SCENARIOS.items():
         for base_learner in config.base_learners:
-            
+            if scenario_name.startswith('Linear') and base_learner != 'linear':
+                continue
+            elif scenario_name.startswith('Smooth') and base_learner != 'polynomial':
+                continue
+            elif scenario_name.startswith('Step') and base_learner != 'tree':
+                continue            
+            elif scenario_name.startswith('Sine') and base_learner != 'bspline':
+                continue            
+
             # Lookup tuned learning rate
             current_lr = config.TUNED_LRS[scenario_name].get(base_learner, config.learning_rate)
             
