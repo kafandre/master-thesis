@@ -36,3 +36,5 @@ results9/
 *.png
 *.pkl
 *.csv
+*.csv.lock
+*.ipynb
