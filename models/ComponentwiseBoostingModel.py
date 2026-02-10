@@ -91,15 +91,19 @@ class ComponentwiseBoostingModel:
             
             # Get current scale (Minimum Loss in this iteration)
             current_min_loss = torch.min(losses_tensor).detach()
+            worst_loss = torch.max(losses_tensor).detach()
 
             # Update Momentum: Inversely proportional to loss
             # vectorized momentum update
             mom_vec = torch.tensor([self.feature_momentum[i] for i in range(n_features)], device=losses_tensor.device)
             mom_vec *= self.momentum_decay
             
-            # Normalized Scores 0.0 - 1.0
-            # Best feature gets score ~1.0. Worst features get ~0.0
-            scores = current_min_loss / (losses_tensor + self.eps_momentum)
+            # Calculate reduction in loss relative to the worst feature
+            gains = worst_loss - losses_tensor
+            max_gain = torch.max(gains)
+
+            # Score is 1.0 for the best feature, 0.0 for the worst
+            scores = gains / (max_gain + 1e-8)
             
             # Accumulate scores
             mom_vec += scores 
@@ -111,7 +115,18 @@ class ComponentwiseBoostingModel:
             # Dynamic Adjustment
             # Scale momentum impact by current loss magnitude
             # relative_impact = strength * history * current_scale
-            adjustment = mom_vec * self.momentum_strength * current_min_loss
+            # adjustment = mom_vec * self.momentum_strength * current_min_loss
+            
+            # Calculate the spread of the current candidate losses
+            loss_std = torch.std(losses_tensor).detach()
+            
+            # Safety: If std is 0 (all features identical), use a tiny epsilon or 1.0
+            scale_factor = loss_std if loss_std > 1e-9 else 1.0
+            
+            # Now strength=0.1 means "Momentum can bridge a gap of 0.1 standard deviations"
+            # This is invariant to the learner type!
+            adjustment = mom_vec * self.momentum_strength * scale_factor
+
             adjusted_losses = losses_tensor - adjustment
         else:
             adjusted_losses = losses_tensor
