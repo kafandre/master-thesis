@@ -1,7 +1,7 @@
 BASE_LEARNERS_LIST = ["linear", "polynomial", "tree", "bspline"]
 
 class config:
-    SEED = 500
+    SEED = 600
     n_seeds = 30
     
     # --- Dataset Configuration ---
@@ -14,29 +14,29 @@ class config:
     # --- Base Learners (4 types) ---
     base_learners = BASE_LEARNERS_LIST
 
-    # Static Hyperparameters
-    poly_degree = 2
-    tree_depth = 1
+    # Polynomial Configuration
+    poly_degree = 5
     
     # B-Spline Configuration
-    spline_degree = 1
-    n_knots = 5  # Number of internal knots
+    spline_degree = 3
+    n_knots = 30
     
     # Tree Configuration
-    n_bins = 32
+    tree_depth = 1
+    n_bins = 256
 
     # Fixed Method Params
-    top_k = 5
+    top_k = 3
     momentum_decay = 0.9
-    momentum_strength = 10.0
+    momentum_strength = 3.0
 
     flood_level = None
     
     # Experiment Config
     n_estimators = 1000
     learning_rate = 0.05
-    train_split = 0.7
-    val_split = 0.15
+    train_split = 0.4
+    val_split = 0.10
 
     # --- Evaluation Configuration ---
     # Scenarios for drift evaluation (Type, Magnitude)
@@ -54,34 +54,70 @@ class config:
     # --- SENSITIVITY ANALYSIS SCENARIOS ---
     # Defines the 7 stress-test environments
     SCENARIOS = {
-        "Baseline": {
-            "n_samples": 500, "dim": 50, "noise_std": 5.0,
-            "signal_type": "linear_interaction", "feature_dist": "normal", "noise_dist": "normal"
+        "Linear": {
+            "n_samples": 1000, "dim": 200,  "signal_scale": 1.0, "noise_std": 5.0,
+            "signal_type": "simple_additive", "feature_dist": "normal", "noise_dist": "normal"
+        },                
+        "Smooth": {
+            "n_samples": 1000, "dim": 200,  "signal_scale": 1.0, "noise_std": 5.0, 
+            "signal_type": "smooth_qubic", "feature_dist": "normal", "noise_dist": "normal"
         },
-        "HighDims": {
-            "n_samples": 250, "dim": 250, "noise_std": 5.0,
-            "signal_type": "linear_interaction", "feature_dist": "normal", "noise_dist": "normal"
-        },
-        "Friedman": {
-            "n_samples": 500, "dim": 50, "noise_std": 1.0, 
-            "signal_type": "friedman", "feature_dist": "normal", "noise_dist": "normal"
+        "Sine": {
+            "n_samples": 1000, "dim": 200,  "signal_scale": 1.0, "noise_std": 5.0,
+            "signal_type": "high_freq", "feature_dist": "normal", "noise_dist": "normal"
         },
         "Step": {
-            "n_samples": 500, "dim": 50, "noise_std": 5.0,
+            "n_samples": 1000, "dim": 200, "signal_scale": 1.0, "noise_std": 2.0,
             "signal_type": "step", "feature_dist": "normal", "noise_dist": "normal"
         },
-        "Multicollinearity": {
-            "n_samples": 500, "dim": 50, "noise_std": 5.0,
-            "signal_type": "linear_interaction", "feature_dist": "correlated", "noise_dist": "normal"
+        "Linear_Noise": {
+            "n_samples": 1000, "dim": 200,  "signal_scale": 1.0, "noise_std": 10.0,
+            "signal_type": "simple_additive", "feature_dist": "normal", "noise_dist": "normal"
+        },                
+        "Smooth_Noise": {
+            "n_samples": 1000, "dim": 200,  "signal_scale": 1.0, "noise_std": 10.0, 
+            "signal_type": "smooth_qubic", "feature_dist": "normal", "noise_dist": "normal"
         },
-        "Outlier_Features": {
-            "n_samples": 500, "dim": 50, "noise_std": 5.0,
-            "signal_type": "linear_interaction", "feature_dist": "student_t", "noise_dist": "normal"
+        "Sine_Noise": {
+            "n_samples": 1000, "dim": 200,  "signal_scale": 1.0, "noise_std": 10.0,
+            "signal_type": "high_freq", "feature_dist": "normal", "noise_dist": "normal"
         },
-        "Outlier_Target": {
-            "n_samples": 500, "dim": 50, "noise_std": 5.0,
-            "signal_type": "linear_interaction", "feature_dist": "normal", "noise_dist": "student_t"
-        }
+        "Step_Noise": {
+            "n_samples": 1000, "dim": 200, "signal_scale": 1.0, "noise_std": 4.0,
+            "signal_type": "step", "feature_dist": "normal", "noise_dist": "normal"
+        },
+        "Linear_HighDim": {
+            "n_samples": 500, "dim": 500,  "signal_scale": 1.0, "noise_std": 5.0,
+            "signal_type": "simple_additive", "feature_dist": "normal", "noise_dist": "normal"
+        },                
+        "Smooth_HighDim": {
+            "n_samples": 500, "dim": 500,  "signal_scale": 1.0, "noise_std": 5.0, 
+            "signal_type": "smooth_qubic", "feature_dist": "normal", "noise_dist": "normal"
+        },
+        "Sine_HighDim": {
+            "n_samples": 500, "dim": 500,  "signal_scale": 1.0, "noise_std": 5.0,
+            "signal_type": "high_freq", "feature_dist": "normal", "noise_dist": "normal"
+        },
+        "Step_HighDim": {
+            "n_samples": 500, "dim": 500, "signal_scale": 1.0, "noise_std": 2.0,
+            "signal_type": "step", "feature_dist": "normal", "noise_dist": "normal"
+        },
+        "Linear_Corr": {
+            "n_samples": 1000, "dim": 200,  "signal_scale": 1.0, "noise_std": 5.0,
+            "signal_type": "simple_additive", "feature_dist": "correlated", "noise_dist": "normal"
+        },                
+        "Smooth_Corr": {
+            "n_samples": 1000, "dim": 200,  "signal_scale": 1.0, "noise_std": 5.0, 
+            "signal_type": "smooth_qubic", "feature_dist": "correlated", "noise_dist": "normal"
+        },
+        "Sine_Corr": {
+            "n_samples": 1000, "dim": 200,  "signal_scale": 1.0, "noise_std": 5.0,
+            "signal_type": "high_freq", "feature_dist": "correlated", "noise_dist": "normal"
+        },
+        "Step_Corr": {
+            "n_samples": 1000, "dim": 200, "signal_scale": 1.0, "noise_std": 2.0,
+            "signal_type": "step", "feature_dist": "correlated", "noise_dist": "normal"
+        },
     }
 
     # --- TUNED LEARNING RATES ---
@@ -92,11 +128,19 @@ class config:
         for scenario in SCENARIOS
     }
 
-    # TUNED_LRS["Baseline"]["tree"] = 0.1
-    # TUNED_LRS["HighDims"]["linear"] = 0.01
+    TUNED_LRS["Step"]["tree"] = 0.2
+    TUNED_LRS["Sine"]["bspline"] = 0.025
+    TUNED_LRS["Step_Noise"]["tree"] = 0.2
+    TUNED_LRS["Sine_Noise"]["bspline"] = 0.025
+    TUNED_LRS["Step_HighDim"]["tree"] = 0.2
+    TUNED_LRS["Sine_HighDim"]["bspline"] = 0.025
+    TUNED_LRS["Step_Corr"]["tree"] = 0.2
+    TUNED_LRS["Sine_Corr"]["bspline"] = 0.025
 
-    # --- Demo / Single Run Configuration (for train.py __main__) ---
-    demo_seed = 100
-    demo_scenario = "Baseline" # Used to pick from SCENARIOS in demo
-    demo_flood_multiplier = 1.0
-    demo_use_flooding = False
+    # TUNED_LRS["Baseline"]["tree"] = 0.1
+    # TUNED_LRS["Baseline"]["bspline"] = 0.1
+    # TUNED_LRS["HighDims"]["linear"] = 0.1
+    # TUNED_LRS["HighDims"]["bspline"] = 0.08
+    # TUNED_LRS["HighDims"]["tree"] = 0.1
+    # TUNED_LRS["HighDims"]["polynomial"] = 0.1
+    

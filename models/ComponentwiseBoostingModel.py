@@ -89,18 +89,45 @@ class ComponentwiseBoostingModel:
             if len(self.feature_momentum) == 0:
                 for i in range(n_features): self.feature_momentum[i] = 0.0
             
+            # Get current scale (Minimum Loss in this iteration)
+            current_min_loss = torch.min(losses_tensor).detach()
+            worst_loss = torch.max(losses_tensor).detach()
+
             # Update Momentum: Inversely proportional to loss
             # vectorized momentum update
             mom_vec = torch.tensor([self.feature_momentum[i] for i in range(n_features)], device=losses_tensor.device)
             mom_vec *= self.momentum_decay
-            scores = 1.0 / (losses_tensor + self.eps_momentum)
-            mom_vec += self.momentum_strength * scores
+            
+            # Calculate reduction in loss relative to the worst feature
+            gains = worst_loss - losses_tensor
+            max_gain = torch.max(gains)
+
+            # Score is 1.0 for the best feature, 0.0 for the worst
+            scores = gains / (max_gain + 1e-8)
+            
+            # Accumulate scores
+            mom_vec += scores 
             
             # Write back to dictionary
             for i in range(n_features):
                 self.feature_momentum[i] = mom_vec[i].item()
                 
-            adjusted_losses = losses_tensor - mom_vec
+            # Dynamic Adjustment
+            # Scale momentum impact by current loss magnitude
+            # relative_impact = strength * history * current_scale
+            # adjustment = mom_vec * self.momentum_strength * current_min_loss
+            
+            # Calculate the spread of the current candidate losses
+            loss_std = torch.std(losses_tensor).detach()
+            
+            # Safety: If std is 0 (all features identical), use a tiny epsilon or 1.0
+            scale_factor = loss_std if loss_std > 1e-9 else 1.0
+            
+            # Now strength=0.1 means "Momentum can bridge a gap of 0.1 standard deviations"
+            # This is invariant to the learner type!
+            adjustment = mom_vec * self.momentum_strength * scale_factor
+
+            adjusted_losses = losses_tensor - adjustment
         else:
             adjusted_losses = losses_tensor
 
@@ -110,7 +137,15 @@ class ComponentwiseBoostingModel:
             # Get indices of the k smallest adjusted losses
             top_k_indices = torch.topk(adjusted_losses, k, largest=False).indices
             # Randomly select one from bucket
-            selected_idx = top_k_indices[torch.randint(0, k, (1,))].item()
+            # selected_idx = top_k_indices[torch.randint(0, k, (1,))].item()
+
+            # create weights 
+            weights = torch.arange(k, 0, -1, device=losses_tensor.device, dtype=torch.float32)
+            # sample from weighted distribution
+            rank_idx = torch.multinomial(weights, 1).item()
+            # map back to original feature index
+            selected_idx = top_k_indices[rank_idx].item()
+        
         else:
             # Greedy
             selected_idx = torch.argmin(adjusted_losses).item()
