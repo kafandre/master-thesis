@@ -137,7 +137,15 @@ class ComponentwiseBoostingModel:
             # Get indices of the k smallest adjusted losses
             top_k_indices = torch.topk(adjusted_losses, k, largest=False).indices
             # Randomly select one from bucket
-            selected_idx = top_k_indices[torch.randint(0, k, (1,))].item()
+            # selected_idx = top_k_indices[torch.randint(0, k, (1,))].item()
+
+            # create weights 
+            weights = torch.arange(k, 0, -1, device=losses_tensor.device, dtype=torch.float32)
+            # sample from weighted distribution
+            rank_idx = torch.multinomial(weights, 1).item()
+            # map back to original feature index
+            selected_idx = top_k_indices[rank_idx].item()
+        
         else:
             # Greedy
             selected_idx = torch.argmin(adjusted_losses).item()
