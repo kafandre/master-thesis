@@ -48,7 +48,6 @@ class SyntheticData(Dataset):
             return torch.randn(self.n_samples, self.n_features)
         
         elif dist_type == 'correlated':
-            # Create correlation between x0 and x2 to trigger "Cancellation"
             mean = np.zeros(self.n_features)
             cov = np.eye(self.n_features)
 
@@ -112,10 +111,11 @@ class SyntheticData(Dataset):
         # 3*pi is fast enough that a simple quadratic poly cannot fit it.
         # Requires local basis functions (Splines/Trees).
         elif signal_type == 'high_freq':
-            amp_sine = 2.0 * (self.coef_meaningful_1 + self.coef_meaningful_2)
+            amp_sine = 0.5 * (self.coef_meaningful_1 + self.coef_meaningful_2)
             amp_linear = (self.coef_meaningful_1 + self.coef_meaningful_2)
-            return (amp_sine * torch.sin(3.0 * np.pi * self.x[:, 0]) + 
-                    amp_linear * self.x[:, 1])
+            return (amp_sine * torch.sin(self.x[:, 0]) + 
+                    amp_linear * self.x[:, 1] + 
+                    amp_sine * torch.cos(self.x[:, 2]))
         
         elif signal_type == 'step':
             amp = (self.coef_meaningful_1 + self.coef_meaningful_2)
