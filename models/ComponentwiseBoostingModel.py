@@ -89,18 +89,30 @@ class ComponentwiseBoostingModel:
             if len(self.feature_momentum) == 0:
                 for i in range(n_features): self.feature_momentum[i] = 0.0
             
+            # Get current scale (Minimum Loss in this iteration)
+            current_min_loss = torch.min(losses_tensor).detach()
+
             # Update Momentum: Inversely proportional to loss
             # vectorized momentum update
             mom_vec = torch.tensor([self.feature_momentum[i] for i in range(n_features)], device=losses_tensor.device)
             mom_vec *= self.momentum_decay
-            scores = 1.0 / (losses_tensor + self.eps_momentum)
-            mom_vec += self.momentum_strength * scores
+            
+            # Normalized Scores 0.0 - 1.0
+            # Best feature gets score ~1.0. Worst features get ~0.0
+            scores = current_min_loss / (losses_tensor + self.eps_momentum)
+            
+            # Accumulate scores
+            mom_vec += scores 
             
             # Write back to dictionary
             for i in range(n_features):
                 self.feature_momentum[i] = mom_vec[i].item()
                 
-            adjusted_losses = losses_tensor - mom_vec
+            # Dynamic Adjustment
+            # Scale momentum impact by current loss magnitude
+            # relative_impact = strength * history * current_scale
+            adjustment = mom_vec * self.momentum_strength * current_min_loss
+            adjusted_losses = losses_tensor - adjustment
         else:
             adjusted_losses = losses_tensor
 
