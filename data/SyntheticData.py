@@ -47,48 +47,38 @@ class SyntheticData(Dataset):
         if dist_type == 'normal':
             return torch.randn(self.n_samples, self.n_features)
         
-        # elif dist_type == 'student_t':
-        #     # Student-t features (df=3) for Outlier_Features scenario
-        #     return torch.tensor(np.random.standard_t(df=3, size=(self.n_samples, self.n_features)), dtype=torch.float32)
-        
         elif dist_type == 'correlated':
             # Create correlation between x0 and x2 to trigger "Cancellation"
             mean = np.zeros(self.n_features)
             cov = np.eye(self.n_features)
-            
-            # 1. Correlate x0 with x2 (Cancellation Trap)
-            cov[0, 2] = 0.70
-            cov[2, 0] = 0.70
-            
-            # 2. Correlate x0 with x1 (Linear vs Quadratic Trap)
-            cov[0, 1] = 0.70
-            cov[1, 0] = 0.70
-            
-            # 3. IMPLIED: Must correlate x1 and x2 to keep matrix valid
-            # 0.64 is the mathematical consequence of 0.8 * 0.8
-            cov[1, 2] = 0.49 
-            cov[2, 1] = 0.49
-            
-            X = np.random.multivariate_normal(mean, cov, self.n_samples)
-            return torch.tensor(X, dtype=torch.float32)
 
-        # elif dist_type == 'correlated_noise':
-        #     # Noise features (3+) are correlated with EACH OTHER
-        #     mean = np.zeros(self.n_features)
-        #     cov = np.eye(self.n_features)
-            
-        #     # Set block correlation for noise features
-        #     noise_idx_start = 3
-        #     if self.n_features > noise_idx_start:
-        #         # Set correlation of 0.8 for all noise pairs
-        #         cov[noise_idx_start:, noise_idx_start:] = 0.8
-        #         # Reset diagonal to 1.0
-        #         diag_idx = np.arange(noise_idx_start, self.n_features)
-        #         cov[diag_idx, diag_idx] = 1.0
-            
-        #     X = np.random.multivariate_normal(mean, cov, self.n_samples)
-        #     return torch.tensor(X, dtype=torch.float32)            
+            rho1=0.95
+            rho2=0.8
+            rho3=0.95
 
+            # Signal Block (Features 0, 1, 2)
+            cov[0:3, 0:3] = rho1
+            
+            # Noise Block (Features 3, 4)
+            if self.n_features >= 5:
+                cov[3:5, 3:5] = rho3
+                
+                # Cross-Block Correlation (Signal vs Noise)
+                cov[0:3, 3:5] = rho2
+                cov[3:5, 0:3] = rho2
+            
+            # Reset diagonal to 1.0 (Variance)
+            np.fill_diagonal(cov, 1.0)
+            
+            # Check for Positive Semi-Definiteness (Numerical stability)
+            try:
+                X = np.random.multivariate_normal(mean, cov, self.n_samples)
+            except np.linalg.LinAlgError:
+                print("Warning: Matrix not positive definite, adding jitter.")
+                cov += np.eye(self.n_features) * 1e-4
+                X = np.random.multivariate_normal(mean, cov, self.n_samples)
+                
+            return torch.tensor(X, dtype=torch.float32)         
         else:
             raise ValueError(f"Unknown feature_dist: {dist_type}")
 
