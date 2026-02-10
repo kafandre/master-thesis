@@ -16,7 +16,7 @@ from joblib import Parallel, delayed
 from filelock import FileLock 
 
 # --- Setup Directories ---
-RESULTS_DIR = "results_test39"
+RESULTS_DIR = "results_test80"
 HISTORY_DIR = os.path.join(RESULTS_DIR, "histories")
 PLOTS_DIR = os.path.join(RESULTS_DIR, "plots")
 SUMMARY_FILE = os.path.join(RESULTS_DIR, "grid_summary.csv")
@@ -53,9 +53,9 @@ sys.stderr = sys.stdout
 # --- Configuration Generation ---
 method_configs = [
     {"name": "Vanilla",             "mom": False, "topk": False},
-    # {"name": "TopK",                "mom": False, "topk": True},
+    {"name": "TopK",                "mom": False, "topk": True},
     {"name": "Momentum",            "mom": True,  "topk": False},
-    # {"name": "TopK+Momentum",       "mom": True,  "topk": True},
+    {"name": "TopK+Momentum",       "mom": True,  "topk": True},
 ]
 
 # --- Helper Functions ---
