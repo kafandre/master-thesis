@@ -3,6 +3,7 @@ from torch.utils.data import random_split
 import numpy as np
 from data.SyntheticData import SyntheticData
 from data.RealData import RealData
+from sklearn.preprocessing import StandardScaler
 from models.ComponentwiseBoostingModel import ComponentwiseBoostingModel
 from config import config as default_config
 import matplotlib.pyplot as plt
@@ -66,6 +67,18 @@ def run_experiment(
     X_test_clean = dataset_clean.x[test_idx]
     y_test_clean = dataset_clean.y[test_idx]
     
+    if default_config.DATASET_TYPE != 'synthetic':
+        scaler = StandardScaler()
+        
+        # 1. Fit scaler ONLY on the Training set
+        scaler.fit(X_train.numpy())
+        
+        # 2. Transform all sets using the Train statistics
+        #    and convert them back to Float Tensors immediately.
+        X_train = torch.tensor(scaler.transform(X_train.numpy()), dtype=torch.float32)
+        X_val   = torch.tensor(scaler.transform(X_val.numpy()),   dtype=torch.float32)
+        X_test_clean = torch.tensor(scaler.transform(X_test_clean.numpy()), dtype=torch.float32)
+
     # --- Determine Flood Level ---
     if forced_flood_level is not None:
         flood_level = forced_flood_level
