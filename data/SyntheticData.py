@@ -51,20 +51,17 @@ class SyntheticData(Dataset):
             mean = np.zeros(self.n_features)
             cov = np.eye(self.n_features)
 
-            rho1=0.95
-            rho2=0.8
-            rho3=0.95
+            rho1=0.7
+            rho2=0.5
+            rho3=0.7
 
-            # Signal Block (Features 0, 1, 2)
-            cov[0:3, 0:3] = rho1
+            cov[0:4, 0:4] = rho1
             
-            # Noise Block (Features 3, 4)
             if self.n_features >= 5:
-                cov[3:5, 3:5] = rho3
+                cov[4:6, 4:6] = rho3
                 
-                # Cross-Block Correlation (Signal vs Noise)
-                cov[0:3, 3:5] = rho2
-                cov[3:5, 0:3] = rho2
+                cov[0:4, 4:6] = rho2
+                cov[4:6, 0:4] = rho2
             
             # Reset diagonal to 1.0 (Variance)
             np.fill_diagonal(cov, 1.0)
@@ -122,7 +119,17 @@ class SyntheticData(Dataset):
             return (amp * torch.sign(torch.sin(2.5 * self.x[:, 0])) + 
                     amp * torch.sign(torch.sin(2.5 * self.x[:, 1])) - 
                     amp * torch.sign(torch.sin(2.5 * self.x[:, 2])))
-            
+        
+        elif signal_type == 'mixed':
+            # 1. Linear (using coef 1)
+            # 2. Cubic Polynomial (using coef 2, scaled down slightly like smooth_qubic)
+            # 3. Sine Wave (using coef 1, freq=3.0 like baseline_composite)
+            # 4. Step Function (using coef 2, freq=2.5 like step)
+            return (self.coef_meaningful_1 * self.x[:, 0] + 
+                    self.coef_meaningful_2 * self.x[:, 1]**2 + 
+                    self.coef_meaningful_1 * torch.sin(5 * self.x[:, 2]) +
+                    self.coef_meaningful_2 * torch.sign(torch.sin(self.x[:, 3])))
+        
         else:
             raise ValueError(f"Unknown signal_type: {signal_type}")
 
