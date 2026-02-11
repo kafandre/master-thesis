@@ -16,13 +16,16 @@ from joblib import Parallel, delayed
 from filelock import FileLock 
 
 # --- Setup Directories ---
-RESULTS_DIR = "results_test86"
+RESULTS_DIR = "results_real_competing_3"
 HISTORY_DIR = os.path.join(RESULTS_DIR, "histories")
 PLOTS_DIR = os.path.join(RESULTS_DIR, "plots")
-SUMMARY_FILE = os.path.join(RESULTS_DIR, "grid_summary.csv")
+SUMMARY_FILE = os.path.join(RESULTS_DIR, "grid_summary_real.csv")
 
 os.makedirs(HISTORY_DIR, exist_ok=True)
 os.makedirs(PLOTS_DIR, exist_ok=True)
+
+# List of real datasets available in data/RealData.py
+REAL_DATASETS = ["bodyfat", "diabetes", "riboflavin"]     # ["diabetes", "bodyfat", "riboflavin"]
 
 class Logger(object):
     def __init__(self, filename):
@@ -46,30 +49,32 @@ class Logger(object):
     def isatty(self):
         return self.terminal.isatty()
 
-log_file_path = os.path.join(RESULTS_DIR, "grid_log.txt")
+log_file_path = os.path.join(RESULTS_DIR, "grid_log_real.txt")
 sys.stdout = Logger(log_file_path)
 sys.stderr = sys.stdout
 
 # --- Configuration Generation ---
 method_configs = [
     {"name": "Vanilla",             "mom": False, "topk": False},
-    # {"name": "TopK",                "mom": False, "topk": True},
-    # {"name": "Momentum",            "mom": True,  "topk": False},
-    # {"name": "TopK+Momentum",       "mom": True,  "topk": True},
+    {"name": "TopK",                "mom": False, "topk": True},
+    {"name": "Momentum",            "mom": True,  "topk": False},
+    {"name": "TopK+Momentum",       "mom": True,  "topk": True},
 ]
 
 # --- Helper Functions ---
 
 def get_run_signature(params):
+    # Signature adapted for Real Data (uses dataset_name instead of scenario)
     sig = (
-        f"{params['scenario']}_{params['base_learner']}_"
+        f"{params['dataset_name']}_{params['base_learner']}_"
         f"{params['method']}_s{params['seed']}_flood{params['use_flooding']}"
     )
     return sig.replace(" ", "")
 
 def get_filename_base(params, flood_level_val=None):
+    # Filename adapted for Real Data
     name = (
-        f"{params['scenario']}_{params['base_learner']}_{params['method'].replace(' ', '')}_seed{params['seed']}"
+        f"{params['dataset_name']}_{params['base_learner']}_{params['method'].replace(' ', '')}_seed{params['seed']}"
     )
     if params['mom']:
         name += f"_momStr{config.momentum_strength}"
@@ -90,7 +95,7 @@ def save_plot(history, flood_level, params, filename_base):
     if params['use_flooding']:
         plt.axhline(y=flood_level, color='black', linestyle='--', label=f'Flood {flood_level:.4f}')
 
-    plt.title(f"{params['scenario']} | {params['base_learner']} | {params['method']} | Seed {params['seed']}")
+    plt.title(f"{params['dataset_name']} | {params['base_learner']} | {params['method']} | Seed {params['seed']}")
     plt.xlabel("Iteration")
     plt.ylabel("MSE")
     plt.legend()
@@ -109,7 +114,13 @@ def run_single_wrapper(params):
     # CRITICAL CPU OPTIMIZATION
     torch.set_num_threads(1) 
     
-    lock_path = os.path.join(RESULTS_DIR, "grid_summary.csv.lock")
+    # --- IMPORTANT: INJECT CONFIG FOR REAL DATA ---
+    # Since we are in a worker process, we must set the global config here
+    # to ensure RealData loads the correct dataset.
+    config.DATASET_TYPE = "real"
+    config.DATASET_NAME = params['dataset_name']
+    
+    lock_path = os.path.join(RESULTS_DIR, "grid_summary_real.csv.lock")
     local_csv_lock = FileLock(lock_path)
 
     learner_arg = params['base_learner']
@@ -134,14 +145,15 @@ def run_single_wrapper(params):
         except Exception as e:
             print(f"Warning: Corrupt history file {clean_fname}, re-running. Error: {e}")
             clean_history = None 
-
+            
     if clean_history is None:
         try:
+            # Note: dim_mode, n_samples, etc. are passed but ignored by RealData class
             res_clean = run_experiment(
                 seed=params['seed'],
-                dim_mode=params['dim'],
-                n_samples=params['n_samples'],
-                noise_std=params['noise_std'],
+                dim_mode=0,         # Ignored for Real
+                n_samples=0,        # Ignored for Real
+                noise_std=0.0,      # Ignored for Real
                 base_learner=learner_arg,
                 use_momentum=params['mom'],
                 use_top_k=params['topk'],
@@ -149,10 +161,9 @@ def run_single_wrapper(params):
                 flood_multiplier=0.0,
                 forced_flood_level=None,
                 specific_top_k=params['top_k_int'],
-                signal_type=params['signal_type'],
-                signal_scale=params['signal_scale'],
-                feature_dist=params['feature_dist'],
-                noise_dist=params['noise_dist'],
+                signal_type="real", # Ignored
+                feature_dist="real",# Ignored
+                noise_dist="real",  # Ignored
                 learning_rate=params['lr']
             )
             clean_history = res_clean['history']
@@ -171,6 +182,7 @@ def run_single_wrapper(params):
                 'mse_clean_last': res_clean['scores']['clean_last'],
                 'val_best': res_clean['scores']['val_best'],
             })
+            # Add any other scores present (likely just clean/val for real data)
             for k, v in res_clean['scores'].items():
                 if k not in ['clean', 'clean_best', 'clean_last', 'val_best']:
                     row[f"mse_{k}"] = v
@@ -185,6 +197,8 @@ def run_single_wrapper(params):
             return 
 
     # --- 2. FLOODING RUN SETUP ---
+    # Logic: If training loss is very low, apply flooding relative to that min loss
+    # For Real Data, we don't have "True Noise Variance", so we rely purely on empirical min train loss.
     if min_train_loss is not None:
         val_losses = clean_history['val_loss']
         train_losses = clean_history['train_loss']
@@ -212,7 +226,6 @@ def run_single_wrapper(params):
         lower_bound = min_train_loss * 1.05
         target_flood_level = max(candidate_flood_level, lower_bound)
 
-        # Proceed with flooding setup...
         flood_params = params.copy()
         flood_params['use_flooding'] = True
         
@@ -223,9 +236,9 @@ def run_single_wrapper(params):
             try:
                 res_flood = run_experiment(
                     seed=params['seed'],
-                    dim_mode=params['dim'],
-                    n_samples=params['n_samples'],
-                    noise_std=params['noise_std'],
+                    dim_mode=0,
+                    n_samples=0,
+                    noise_std=0.0,
                     base_learner=learner_arg,
                     use_momentum=params['mom'],
                     use_top_k=params['topk'],
@@ -233,10 +246,9 @@ def run_single_wrapper(params):
                     flood_multiplier=0.0, 
                     forced_flood_level=target_flood_level,
                     specific_top_k=params['top_k_int'],
-                    signal_type=params['signal_type'],
-                    signal_scale=params['signal_scale'],
-                    feature_dist=params['feature_dist'],
-                    noise_dist=params['noise_dist'],
+                    signal_type="real",
+                    feature_dist="real",
+                    noise_dist="real",
                     learning_rate=params['lr']
                 )
                 
@@ -271,28 +283,22 @@ def run_single_wrapper(params):
 if __name__ == "__main__":
 
     total_iterations_est = (
-        len(config.SCENARIOS) * len(config.base_learners) * len(method_configs) * config.n_seeds
+        len(REAL_DATASETS) * len(config.base_learners) * len(method_configs) * config.n_seeds
     )
 
-    print(f"Preparing Parallel Sensitivity Analysis. Approx Combinations: {total_iterations_est}")
+    print(f"Preparing Parallel Real Data Analysis. Approx Combinations: {total_iterations_est}")
+    print(f"Datasets: {REAL_DATASETS}")
     print(f"Resuming is supported: Existing 'Hist_*.pkl' files will be skipped.")
 
     all_jobs = []
     
-    # Iterate over Scenarios
-    for scenario_name, scen_params in config.SCENARIOS.items():
+    # Iterate over Real Datasets
+    for dataset_name in REAL_DATASETS:
         for base_learner in config.base_learners:
-            if scenario_name.startswith('Linear') and base_learner != 'linear':
-                continue
-            elif scenario_name.startswith('Smooth') and base_learner != 'polynomial':
-                continue
-            elif scenario_name.startswith('Step') and base_learner != 'tree':
-                continue            
-            elif scenario_name.startswith('Sine') and base_learner != 'bspline':
-                continue            
-
-            # Lookup tuned learning rate
-            current_lr = config.TUNED_LRS[scenario_name].get(base_learner, config.learning_rate)
+            # if base_learner == "bspline" and dataset_name in ["riboflavin", "pcr"]:
+            #     continue
+            # Use default Learning Rate for Real Data (or define a dictionary if needed)
+            current_lr = config.learning_rate
             
             for method_conf in method_configs:
                 for seed_offset in range(config.n_seeds):
@@ -301,15 +307,8 @@ if __name__ == "__main__":
                     actual_k = config.top_k
 
                     params = {
-                        'scenario': scenario_name,
+                        'dataset_name': dataset_name,
                         'base_learner': base_learner,
-                        'dim': scen_params['dim'],
-                        'n_samples': scen_params['n_samples'],
-                        'noise_std': scen_params['noise_std'],
-                        'signal_type': scen_params['signal_type'],
-                        'signal_scale': scen_params['signal_scale'],                        
-                        'feature_dist': scen_params['feature_dist'],
-                        'noise_dist': scen_params['noise_dist'],
                         'lr': current_lr,
                         'seed': seed,
                         'method': method_conf['name'],
@@ -327,4 +326,4 @@ if __name__ == "__main__":
         delayed(run_single_wrapper)(p) for p in all_jobs
     )
 
-    print("Sensitivity Analysis Complete.")
+    print("Real Data Analysis Complete.")
