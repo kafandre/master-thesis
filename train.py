@@ -4,6 +4,7 @@ import numpy as np
 from data.SyntheticData import SyntheticData
 from data.RealData import RealData
 from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import KFold
 from models.ComponentwiseBoostingModel import ComponentwiseBoostingModel
 from config import config as default_config
 import matplotlib.pyplot as plt
@@ -48,36 +49,29 @@ def run_experiment(
     
     # Splits
     total_len = len(dataset_clean)
-    train_len = int(default_config.train_split * total_len)
-    val_len = int(default_config.val_split * total_len)
-    test_len = total_len - train_len - val_len
+    test_len = int(0.15 * total_len)  # Fixed 15% Test
+    train_val_len = total_len - test_len
     
     # Deterministic Split
     g = torch.Generator().manual_seed(seed)
     indices = torch.randperm(total_len, generator=g).tolist()
     
-    train_idx = indices[:train_len]
-    val_idx = indices[train_len:train_len+val_len]
-    test_idx = indices[train_len+val_len:]
+    train_val_idx = indices[:train_val_len]
+    test_idx = indices[train_val_len:]
     
-    X_train = dataset_clean.x[train_idx]
-    y_train = dataset_clean.y[train_idx]
-    X_val = dataset_clean.x[val_idx]
-    y_val = dataset_clean.y[val_idx]
+    X_train_val = dataset_clean.x[train_val_idx]
+    y_train_val = dataset_clean.y[train_val_idx]
     X_test_clean = dataset_clean.x[test_idx]
     y_test_clean = dataset_clean.y[test_idx]
     
     if default_config.DATASET_TYPE != 'synthetic':
         scaler = StandardScaler()
+        # Fit scaler on the combined Train+Val set
+        scaler.fit(X_train_val.numpy())
         
-        # 1. Fit scaler ONLY on the Training set
-        scaler.fit(X_train.numpy())
-        
-        # 2. Transform all sets using the Train statistics
-        #    and convert them back to Float Tensors immediately.
-        X_train = torch.tensor(scaler.transform(X_train.numpy()), dtype=torch.float32)
-        X_val   = torch.tensor(scaler.transform(X_val.numpy()),   dtype=torch.float32)
+        X_train_val = torch.tensor(scaler.transform(X_train_val.numpy()), dtype=torch.float32)
         X_test_clean = torch.tensor(scaler.transform(X_test_clean.numpy()), dtype=torch.float32)
+
 
     # --- Determine Flood Level ---
     if forced_flood_level is not None:
@@ -93,8 +87,12 @@ def run_experiment(
     # determine LR
     lr = learning_rate if learning_rate is not None else default_config.learning_rate
 
-    # Init Model
-    model = ComponentwiseBoostingModel(
+    # K-fold CV
+    kf = KFold(n_splits=default_config.k_folds, shuffle=True, random_state=seed)
+    
+    cv_val_histories = []
+
+    model_params = dict(
         n_estimators=default_config.n_estimators,
         learning_rate=lr,
         base_learner=base_learner,
@@ -114,31 +112,60 @@ def run_experiment(
         eps_momentum=default_config.eps_momentum,
         eps_linear=default_config.eps_linear
     )
-    
-    # Fit
-    model.fit(
-        X_train, y_train,
-        X_val, y_val,
-        X_test=X_test_clean,
-        y_test=y_test_clean
-        )
 
-    # --- 2. Evaluate (5 Scenarios) ---
+    # CV
+    for fold_i, (t_idx, v_idx) in enumerate(kf.split(X_train_val)):
+        # Slicing for this fold
+        X_f_train, y_f_train = X_train_val[t_idx], y_train_val[t_idx]
+        X_f_val, y_f_val = X_train_val[v_idx], y_train_val[v_idx]
+        
+        # Init independent model for this fold
+        cv_model = ComponentwiseBoostingModel(**model_params)
+        
+        # Fit (No Test set passed here, only Val)
+        cv_model.fit(X_f_train, y_f_train, X_val=X_f_val, y_val=y_f_val)
+        
+        # Store Validation Loss Curve
+        cv_val_histories.append(cv_model.history['val_loss'])
+
+    # Aggregation
+    # Average the validation curves element-wise
+    avg_val_loss = np.mean(np.array(cv_val_histories), axis=0)
+    best_iter_cv = np.argmin(avg_val_loss) + 1  # +1 because index 0 is iter 1
+    min_val_loss_cv = avg_val_loss[best_iter_cv - 1]
+
+    # Refit final model
+    # Train on FULL TrainVal set (85% of data)
+    final_model = ComponentwiseBoostingModel(**model_params)
+    
+    # Pass X_test here purely for logging 'test_loss' curve, 
+    # NOT for early stopping.
+    final_model.fit(
+        X_train_val, y_train_val,
+        X_val=None, y_val=None,
+        X_test=X_test_clean, y_test=y_test_clean
+    )
+    
+    # Overwrite the model's best_iteration_ with the one found via CV
+    final_model.best_iteration_ = best_iter_cv
+    
+    # Inject the Averaged CV Validation Loss into the history
+    # This ensures run_grid_real.py uses the smooth CV curve for flooding calculations
+    final_model.history['val_loss'] = avg_val_loss.tolist()
+
     results = {}
     
     # Helper to evaluate
     def get_mse(X, y, use_best):
-        pred = model.predict(X, use_best_model=use_best)
+        pred = final_model.predict(X, use_best_model=use_best)
         return torch.mean((pred - y)**2).item()
 
-    # record validation loss at best iteration
-    results['val_best'] = model.history['val_loss'][model.best_iteration_ - 1] if model.best_iteration_ > 0 else model.history['val_loss'][-1]
+    results['val_best'] = min_val_loss_cv
 
-    # A. Clean Test (Best & Last)
+    # Clean Test (at Best CV Iteration)
     results['clean_best'] = get_mse(X_test_clean, y_test_clean, use_best=True)
+    # Clean Test (at Final Iteration)
     results['clean_last'] = get_mse(X_test_clean, y_test_clean, use_best=False)
-    
-    # For backward compatibility with existing code that expects 'clean'
     results['clean'] = results['clean_best']
     
     # B. Drift Scenarios (Synthetic Only)
@@ -167,10 +194,10 @@ def run_experiment(
             results[f"{d_type}_{d_mag}"] = results[f"{d_type}_{d_mag}_best"]
         
     return {
-        'model_obj': model, 
-        'best_iter': model.best_iteration_,
+        'model_obj': final_model, 
+        'best_iter': best_iter_cv,
         'scores': results,
-        'history': model.history,
+        'history': final_model.history,
         'flood_level': flood_level,
         'n_samples': n_samples,
         'dim_mode': dim_mode,
