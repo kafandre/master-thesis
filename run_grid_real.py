@@ -295,6 +295,8 @@ if __name__ == "__main__":
     # Iterate over Real Datasets
     for dataset_name in REAL_DATASETS:
         for base_learner in config.base_learners:
+            if dataset_name == 'riboflavin' and base_learner != 'linear':
+                continue
             # if base_learner == "bspline" and dataset_name in ["riboflavin", "pcr"]:
             #     continue
             # Use default Learning Rate for Real Data (or define a dictionary if needed)

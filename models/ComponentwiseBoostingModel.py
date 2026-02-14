@@ -26,7 +26,7 @@ class ComponentwiseBoostingModel:
         random_state: Optional[int] = None,
         eps_momentum: float = 1e-6,
         eps_linear: float = 1e-8,
-        target_df: float = 5.0 # New: Target Degrees of Freedom for penalization
+        target_df: float = 1.0 # New: Target Degrees of Freedom for penalization
     ):
         self.n_estimators = n_estimators
         self.learning_rate = learning_rate

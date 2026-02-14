@@ -11,24 +11,34 @@ import matplotlib.pyplot as plt
 
 def run_experiment(
     seed,
+    # Scenario Params
+    dataset_type,
+    dataset_name,
     dim_mode,
     n_samples,
     noise_std,
-    base_learner,
+    signal_type,
+    feature_dist,
+    rho1, rho2, rho3,
+    # Model/Method Params
+    competing_learners,
+    learning_rate,
+    train_split,
     use_momentum,
     use_top_k,
     use_flooding,
-    flood_multiplier,
     forced_flood_level=None,
-    specific_top_k=None,
-    signal_type='linear_interaction',
-    signal_scale=1.0,
-    feature_dist='normal',
-    noise_dist='normal',
-    learning_rate=None
+    # Hyperparams
+    top_k=5,
+    momentum_strength=3.0,
+    poly_degree=3,
+    n_knots=30,
+    n_bins=256,
+    target_df=1.0,
+    method_name="Vanilla"
 ):
-    # --- 1. Train on CLEAN Data ---
-    if default_config.DATASET_TYPE == 'synthetic':
+    # --- 1. Load Data ---
+    if dataset_type == 'synthetic':
         dataset_clean = SyntheticData(
             n_samples=n_samples,
             dim_mode=dim_mode,
@@ -36,141 +46,115 @@ def run_experiment(
             seed=seed,
             drift_type='none',
             signal_type=signal_type,
-            signal_scale=signal_scale,
             feature_dist=feature_dist,
-            noise_dist=noise_dist
+            rho1=rho1, rho2=rho2, rho3=rho3
         )
     else:
-        # For Real Data
         dataset_clean = RealData(
-            dataset_name=default_config.DATASET_NAME, 
+            dataset_name=dataset_name, 
             seed=seed
         )
     
-    # Splits
+    # --- 2. Splits ---
     total_len = len(dataset_clean)
-    test_len = int(0.15 * total_len)  # Fixed 15% Test
-    train_val_len = total_len - test_len
+    n_dev = int(train_split * total_len)
     
     # Deterministic Split
     g = torch.Generator().manual_seed(seed)
     indices = torch.randperm(total_len, generator=g).tolist()
     
-    train_val_idx = indices[:train_val_len]
-    test_idx = indices[train_val_len:]
+    dev_idx = indices[:n_dev]
+    test_idx = indices[n_dev:]
     
-    X_train_val = dataset_clean.x[train_val_idx]
-    y_train_val = dataset_clean.y[train_val_idx]
-    X_test_clean = dataset_clean.x[test_idx]
-    y_test_clean = dataset_clean.y[test_idx]
+    X_dev = dataset_clean.x[dev_idx]
+    y_dev = dataset_clean.y[dev_idx]
+    X_test = dataset_clean.x[test_idx]
+    y_test = dataset_clean.y[test_idx]
     
-    if default_config.DATASET_TYPE != 'synthetic':
+    if dataset_type == 'real':
         scaler = StandardScaler()
-        # Fit scaler on the combined Train+Val set
-        scaler.fit(X_train_val.numpy())
-        
-        X_train_val = torch.tensor(scaler.transform(X_train_val.numpy()), dtype=torch.float32)
-        X_test_clean = torch.tensor(scaler.transform(X_test_clean.numpy()), dtype=torch.float32)
+        scaler.fit(X_dev.numpy())
+        X_dev = torch.tensor(scaler.transform(X_dev.numpy()), dtype=torch.float32)
+        X_test = torch.tensor(scaler.transform(X_test.numpy()), dtype=torch.float32)
 
+    # --- 3. Determine Flood Level ---
+    flood_level = 0.0
+    if use_flooding:
+        if forced_flood_level is not None:
+            flood_level = forced_flood_level
+        elif dataset_type == 'synthetic':
+            flood_level = noise_std ** 2
 
-    # --- Determine Flood Level ---
-    if forced_flood_level is not None:
-        flood_level = forced_flood_level
-    elif default_config.flood_level is None:
-        flood_level = dataset_clean.true_noise_var * flood_multiplier
-    else:
-        flood_level = default_config.flood_level
-    
-    # deteremine top-k
-    current_top_k = specific_top_k if specific_top_k is not None else default_config.top_k
-    
-    # determine LR
-    lr = learning_rate if learning_rate is not None else default_config.learning_rate
-
-    # K-fold CV
-    kf = KFold(n_splits=default_config.k_folds, shuffle=True, random_state=seed)
-    
-    cv_val_histories = []
-
+    # --- 4. Model Setup ---
     model_params = dict(
         n_estimators=default_config.n_estimators,
-        learning_rate=lr,
-        base_learner=base_learner,
-        poly_degree=default_config.poly_degree,
-        tree_max_depth=default_config.tree_depth,
-        n_bins=default_config.n_bins,
-        spline_degree=default_config.spline_degree,
-        n_knots=default_config.n_knots,
+        learning_rate=learning_rate,
+        base_learner=competing_learners,
+        poly_degree=poly_degree,
+        tree_max_depth=1,
+        n_bins=n_bins,
+        spline_degree=3,
+        n_knots=n_knots,
         loss='flooding' if use_flooding else 'mse',
         flood_level=flood_level,
         use_momentum=use_momentum,
         use_top_k=use_top_k,
-        top_k=current_top_k,
+        top_k=top_k,
         momentum_decay=default_config.momentum_decay,
-        momentum_strength=default_config.momentum_strength,
+        momentum_strength=momentum_strength,
         random_state=seed,
         eps_momentum=default_config.eps_momentum,
-        eps_linear=default_config.eps_linear
+        eps_linear=default_config.eps_linear,
+        target_df=target_df
     )
 
-    # CV
-    for fold_i, (t_idx, v_idx) in enumerate(kf.split(X_train_val)):
-        # Slicing for this fold
-        X_f_train, y_f_train = X_train_val[t_idx], y_train_val[t_idx]
-        X_f_val, y_f_val = X_train_val[v_idx], y_train_val[v_idx]
+    # --- 5. CV ---
+    kf = KFold(n_splits=default_config.k_folds, shuffle=True, random_state=seed)
+    cv_val_histories = []
+
+    for fold_i, (t_idx, v_idx) in enumerate(kf.split(X_dev)):
+        X_f_train, y_f_train = X_dev[t_idx], y_dev[t_idx]
+        X_f_val, y_f_val = X_dev[v_idx], y_dev[v_idx]
         
-        # Init independent model for this fold
         cv_model = ComponentwiseBoostingModel(**model_params)
-        
-        # Fit (No Test set passed here, only Val)
         cv_model.fit(X_f_train, y_f_train, X_val=X_f_val, y_val=y_f_val)
-        
-        # Store Validation Loss Curve
         cv_val_histories.append(cv_model.history['val_loss'])
 
-    # Aggregation
-    # Average the validation curves element-wise
     avg_val_loss = np.mean(np.array(cv_val_histories), axis=0)
-    best_iter_cv = np.argmin(avg_val_loss) + 1  # +1 because index 0 is iter 1
+    best_iter_cv = np.argmin(avg_val_loss) + 1 
     min_val_loss_cv = avg_val_loss[best_iter_cv - 1]
 
-    # Refit final model
-    # Train on FULL TrainVal set (85% of data)
+    # --- 6. Final Fit ---
     final_model = ComponentwiseBoostingModel(**model_params)
-    
-    # Pass X_test here purely for logging 'test_loss' curve, 
-    # NOT for early stopping.
     final_model.fit(
-        X_train_val, y_train_val,
-        X_val=None, y_val=None,
-        X_test=X_test_clean, y_test=y_test_clean
+        X_dev, y_dev,
+        X_val=None, y_val=None, 
+        X_test=X_test, y_test=y_test # Tracking Test Loss here
     )
-    
-    # Overwrite the model's best_iteration_ with the one found via CV
     final_model.best_iteration_ = best_iter_cv
-    
-    # Inject the Averaged CV Validation Loss into the history
-    # This ensures run_grid_real.py uses the smooth CV curve for flooding calculations
     final_model.history['val_loss'] = avg_val_loss.tolist()
 
+    # --- 7. Evaluation ---
     results = {}
-    
-    # Helper to evaluate
     def get_mse(X, y, use_best):
         pred = final_model.predict(X, use_best_model=use_best)
         return torch.mean((pred - y)**2).item()
 
     results['val_best'] = min_val_loss_cv
-
-    # Clean Test (at Best CV Iteration)
-    results['clean_best'] = get_mse(X_test_clean, y_test_clean, use_best=True)
-    # Clean Test (at Final Iteration)
-    results['clean_last'] = get_mse(X_test_clean, y_test_clean, use_best=False)
+    results['clean_best'] = get_mse(X_test, y_test, use_best=True)
     results['clean'] = results['clean_best']
-    
-    # B. Drift Scenarios (Synthetic Only)
-    if default_config.DATASET_TYPE == 'synthetic':
-        for d_type, d_mag in default_config.drift_scenarios:
+
+    # --- 8. Drift Scenarios (Only for Best Iteration) ---
+    if dataset_type == 'synthetic':
+        # Define the 4 standard scenarios
+        drifts = [
+            ('meaningful', 'weak'),
+            ('meaningful', 'strong'),
+            ('noise', 'weak'),
+            ('noise', 'strong')
+        ]
+        
+        for d_type, d_mag in drifts:
             ds_drift = SyntheticData(
                 n_samples=n_samples,
                 dim_mode=dim_mode,
@@ -179,123 +163,21 @@ def run_experiment(
                 drift_type=d_type,
                 drift_magnitude=d_mag,
                 signal_type=signal_type,
-                signal_scale=signal_scale,
                 feature_dist=feature_dist,
-                noise_dist=noise_dist
+                rho1=rho1, rho2=rho2, rho3=rho3
             )
+            # Use the SAME test indices to simulate drift on the test set
             X_test_drift = ds_drift.x[test_idx]
             y_test_drift = ds_drift.y[test_idx]
             
-            # Record both Best and Last model performance on drift
-            results[f"{d_type}_{d_mag}_best"] = get_mse(X_test_drift, y_test_drift, use_best=True)
-            results[f"{d_type}_{d_mag}_last"] = get_mse(X_test_drift, y_test_drift, use_best=False)
-            
-            # For backward compatibility
-            results[f"{d_type}_{d_mag}"] = results[f"{d_type}_{d_mag}_best"]
-        
+            # Save ONLY the best model performance
+            key = f"mse_{d_type}_{d_mag}_best"
+            results[key] = get_mse(X_test_drift, y_test_drift, use_best=True)
+
     return {
         'model_obj': final_model, 
         'best_iter': best_iter_cv,
         'scores': results,
         'history': final_model.history,
-        'flood_level': flood_level,
-        'n_samples': n_samples,
-        'dim_mode': dim_mode,
-        'use_momentum': use_momentum,
-        'use_top_k': use_top_k
+        'flood_level': flood_level
     }
-
-if __name__ == "__main__":
-    plt.ion()
-    torch.set_num_threads(1)
-
-    # DEMO
-    scenario_name = default_config.demo_scenario
-    scen_params = default_config.SCENARIOS[scenario_name]
-    
-    print(f"Running Demo on Scenario: {scenario_name}")
-    print(f"Params: {scen_params}")
-
-    # Format: (Name, Momentum, Top-K)
-    settings_list = [
-        {"name": "Vanilla",             "mom": False, "topk": False},
-        {"name": "Top-K Only",          "mom": False, "topk": True},
-        {"name": "Momentum Only",       "mom": True,  "topk": False},
-        {"name": "Top-K + Momentum",    "mom": True,  "topk": True},
-    ]
-
-    for setting in settings_list:
-        print(f"\n--- Running Experiment: {setting['name']} ---")
-        
-        # 1. Run the experiment
-        res = run_experiment(
-            seed=default_config.demo_seed, 
-            dim_mode=scen_params['dim'], 
-            n_samples=scen_params['n_samples'], 
-            noise_std=scen_params['noise_std'], 
-            base_learner=default_config.demo_base_learner, 
-            use_momentum=setting["mom"],
-            use_top_k=setting["topk"], 
-            use_flooding=default_config.demo_use_flooding,
-            flood_multiplier=default_config.demo_flood_multiplier,
-            signal_type=scen_params['signal_type'],
-            signal_scale=scen_params['signal_scale'],
-            feature_dist=scen_params['feature_dist'],
-            noise_dist=scen_params['noise_dist']
-        )
-
-        # Evaliation Scores
-        scores = res['scores']
-        print(f"--- Evaluation Scores (Best Iter: {res['best_iter']}) ---")
-        
-        score_text = f"Best Iter: {res['best_iter']}\n\n"
-        for key, value in scores.items():
-            line = f"{key}: {value:.4f}"
-            print(line)
-            score_text += line + "\n"
-        print("-----------------------------------------------------")
-
-        history = res['history']
-        flood_level = res['flood_level']
-        
-        plt.figure(figsize=(12, 7))
-        
-        if 'train_loss' in history:
-            plt.plot(history['train_loss'], label='Train Loss', color='blue', alpha=0.6, linewidth=1)
-        
-        if 'val_loss' in history and len(history['val_loss']) > 0:
-            plt.plot(history['val_loss'], label='Validation Loss', color='green', alpha=0.8, linewidth=1.5)
-            
-        if 'test_loss' in history and len(history['test_loss']) > 0:
-            plt.plot(history['test_loss'], label='Test Loss (Clean)', color='red', alpha=0.8, linewidth=1.5)
-        
-        plt.axhline(y=flood_level, color='black', linestyle='--', linewidth=2, label=f'Flood Level ({flood_level:.3f})')
-        
-        plt.subplots_adjust(right=0.70) 
-        plt.text(1.05, 0.5, score_text, transform=plt.gca().transAxes, fontsize=10, 
-                verticalalignment='center', bbox=dict(boxstyle="round,pad=0.5", facecolor='white', alpha=0.9, edgecolor='gray'))
-
-        safe_setting_name = setting['name'].replace(" ", "_").replace("(", "").replace(")", "")
-        
-        plot_title = (
-            f"{setting['name']} | {default_config.demo_base_learner} | {scenario_name}\n"
-            f"Flood x{default_config.demo_flood_multiplier} (Lvl: {flood_level:.3f})"
-        )
-        
-        filename = f"Plot_Demo_{scenario_name}_{safe_setting_name}.png"
-
-        plt.xlabel('Boosting Iterations')
-        plt.ylabel('MSE Loss')
-        plt.title(plot_title)
-        plt.legend()
-        plt.grid(True, linestyle=':', alpha=0.6)
-        
-        plt.tight_layout()
-        plt.savefig(filename)
-        
-        plt.draw()
-        plt.pause(0.1)
-
-    print("All runs finished. Close plot windows to exit.")
-    plt.ioff()
-    plt.show()
