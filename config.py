@@ -1,6 +1,6 @@
 class config:
     SEED = 1000
-    n_seeds = 5
+    n_seeds = 30
     
     # --- Global Defaults (kept for reference, but manually injected below) ---
     n_estimators = 1000
