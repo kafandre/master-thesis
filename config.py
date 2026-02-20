@@ -148,16 +148,6 @@ class config:
         "step_highdim": {
             "dataset_type": "synthetic", "dataset_name": "synthetic",
             "signal_type": "step", "learning_rate": 0.2,
-            "n_samples": 500, "dim": 500, "noise_std": 1.0,
-            "rho1": 0.5, "rho2": 0.25, "rho3": 0.5, "feature_dist": "correlated",
-            "competing_learners": TREE,
-            "train_split": 0.5,
-            "top_k": 5, "momentum_strength": 3.0, "target_df": 1.0,
-            "n_knots": 30, "n_bins": 256, "poly_degree": 5
-        },
-        "step_highnoise": {
-            "dataset_type": "synthetic", "dataset_name": "synthetic",
-            "signal_type": "step", "learning_rate": 2.0,
             "n_samples": 1000, "dim": 200, "noise_std": 2.0,
             "rho1": 0.5, "rho2": 0.25, "rho3": 0.5, "feature_dist": "correlated",
             "competing_learners": TREE,
