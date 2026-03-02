@@ -37,7 +37,7 @@ def run_experiment(
     target_df=1.0,
     method_name="Vanilla"
 ):
-    # --- 1. Load Data ---
+    # Load Data
     if dataset_type == 'synthetic':
         dataset_clean = SyntheticData(
             n_samples=n_samples,
@@ -55,11 +55,11 @@ def run_experiment(
             seed=seed
         )
     
-    # --- 2. Splits ---
+    # Splits
     total_len = len(dataset_clean)
     n_dev = int(train_split * total_len)
     
-    # Deterministic Split
+    # Deterministic pplit using specified seed
     g = torch.Generator().manual_seed(seed)
     indices = torch.randperm(total_len, generator=g).tolist()
     
@@ -71,13 +71,14 @@ def run_experiment(
     X_test = dataset_clean.x[test_idx]
     y_test = dataset_clean.y[test_idx]
     
+    # scale real data using standard scaler
     if dataset_type == 'real':
         scaler = StandardScaler()
         scaler.fit(X_dev.numpy())
         X_dev = torch.tensor(scaler.transform(X_dev.numpy()), dtype=torch.float32)
         X_test = torch.tensor(scaler.transform(X_test.numpy()), dtype=torch.float32)
 
-    # --- 3. Determine Flood Level ---
+    # Determine Flood Level based on noise variance if synthetic
     flood_level = 0.0
     if use_flooding:
         if forced_flood_level is not None:
@@ -85,7 +86,7 @@ def run_experiment(
         elif dataset_type == 'synthetic':
             flood_level = noise_std ** 2
 
-    # --- 4. Model Setup ---
+    # Model Setup
     model_params = dict(
         n_estimators=default_config.n_estimators,
         learning_rate=learning_rate,
@@ -108,10 +109,11 @@ def run_experiment(
         target_df=target_df
     )
 
-    # --- 5. CV ---
+    # Initialize K-fold CV
     kf = KFold(n_splits=default_config.k_folds, shuffle=True, random_state=seed)
     cv_val_histories = []
 
+    # Train model on each fold and record val loss
     for fold_i, (t_idx, v_idx) in enumerate(kf.split(X_dev)):
         X_f_train, y_f_train = X_dev[t_idx], y_dev[t_idx]
         X_f_val, y_f_val = X_dev[v_idx], y_dev[v_idx]
@@ -120,11 +122,12 @@ def run_experiment(
         cv_model.fit(X_f_train, y_f_train, X_val=X_f_val, y_val=y_f_val)
         cv_val_histories.append(cv_model.history['val_loss'])
 
+    # Find iteration with min avg val loss
     avg_val_loss = np.mean(np.array(cv_val_histories), axis=0)
     best_iter_cv = np.argmin(avg_val_loss) + 1 
     min_val_loss_cv = avg_val_loss[best_iter_cv - 1]
 
-    # --- 6. Final Fit ---
+    # Final fit
     final_model = ComponentwiseBoostingModel(**model_params)
     final_model.fit(
         X_dev, y_dev,
@@ -134,7 +137,7 @@ def run_experiment(
     final_model.best_iteration_ = best_iter_cv
     final_model.history['val_loss'] = avg_val_loss.tolist()
 
-    # --- 7. Evaluation ---
+    # Evaluate on test set
     results = {}
     def get_mse(X, y, use_best):
         pred = final_model.predict(X, use_best_model=use_best)
@@ -144,9 +147,8 @@ def run_experiment(
     results['clean_best'] = get_mse(X_test, y_test, use_best=True)
     results['clean'] = results['clean_best']
 
-    # --- 8. Drift Scenarios (Only for Best Iteration) ---
+    # Drift Scenarios
     if dataset_type == 'synthetic':
-        # Define the 4 standard scenarios
         drifts = [
             ('meaningful', 'weak'),
             ('meaningful', 'strong'),
@@ -166,11 +168,11 @@ def run_experiment(
                 feature_dist=feature_dist,
                 rho1=rho1, rho2=rho2, rho3=rho3
             )
-            # Use the SAME test indices to simulate drift on the test set
+            # Simulate drift on test set using same indices
             X_test_drift = ds_drift.x[test_idx]
             y_test_drift = ds_drift.y[test_idx]
             
-            # Save ONLY the best model performance
+            # Save only the best model performance
             key = f"mse_{d_type}_{d_mag}_best"
             results[key] = get_mse(X_test_drift, y_test_drift, use_best=True)
 
