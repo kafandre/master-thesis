@@ -14,19 +14,17 @@ class SyntheticData(Dataset):
             
         self.n_samples = n_samples
         self.n_features = dim_mode
-        # signal_scale removed as per requirements, using implied 1.0 or handled in signal gen if needed
-        # (For this refactor, we assume signal logic stays internally consistent)
         
         # Store correlation params
         self.rho1 = rho1
         self.rho2 = rho2
         self.rho3 = rho3
 
-        # 1. Generate Features
+        # Generate Features
         self.signal_type = signal_type
         self.x = self._generate_features(feature_dist)
 
-        # --- Drift Parameters (Kept for compatibility, though drift loop is removed in train) ---
+        # Drift parameters
         self.coef_meaningful_1 = 3.0 
         self.coef_meaningful_2 = 2.0 
         self.noise_mean = 0.0
@@ -34,10 +32,10 @@ class SyntheticData(Dataset):
         # Apply Drifts
         self._apply_drift(drift_type, drift_magnitude)
 
-        # 2. Generate Target Signal
+        # Generate Target Signal
         signal = self._generate_signal(signal_type)
         
-        # 3. Add Noise (Always Normal as per removal of noise_dist param)
+        # Add Noise
         epsilon = torch.randn(n_samples) * noise_std
         
         self.y = signal + epsilon
@@ -58,28 +56,22 @@ class SyntheticData(Dataset):
             signal_type = self.signal_type
 
             if signal_type != 'mixed':
-                # Block 1
                 cov[0:3, 0:3] = r1
                 if self.n_features >= 5:
-                    # Block 2
                     cov[3:5, 3:5] = r3
-                    # Cross Blocks
                     cov[0:3, 3:5] = r2
                     cov[3:5, 0:3] = r2
             else:
-                # Block 1
                 cov[0:4, 0:4] = r1
                 if self.n_features >= 5:
-                    # Block 2
                     cov[4:6, 4:6] = r3
-                    # Cross Blocks
                     cov[0:4, 4:6] = r2
                     cov[4:6, 0:4] = r2
 
-            # Reset diagonal to 1.0 (Variance)
+            # Reset diagonal to variance
             np.fill_diagonal(cov, 1.0)
             
-            # Check for Positive Semi-Definiteness
+            # check for positive semi definiteness
             try:
                 X = np.random.multivariate_normal(mean, cov, self.n_samples)
             except np.linalg.LinAlgError:
@@ -99,6 +91,7 @@ class SyntheticData(Dataset):
                     self.coef_meaningful_1 * self.x[:, 2])
         
         elif signal_type == 'smooth_qubic':
+            # Polynomial
             return (self.coef_meaningful_1 * self.x[:, 0]**2 + 
                     self.coef_meaningful_2 * 0.5 * self.x[:, 1]**3 - 
                     self.coef_meaningful_1 * self.x[:, 2]**2)
@@ -112,6 +105,7 @@ class SyntheticData(Dataset):
                     amp_sine * torch.cos(self.x[:, 2]))
         
         elif signal_type == 'step':
+            # Discontinuous
             amp = (self.coef_meaningful_1 + self.coef_meaningful_2)
             return (amp * torch.sign(torch.sin(2.5 * self.x[:, 0])) + 
                     amp * torch.sign(torch.sin(2.5 * self.x[:, 1])) - 

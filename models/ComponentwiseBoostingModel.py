@@ -10,13 +10,13 @@ class ComponentwiseBoostingModel:
         self, 
         n_estimators: int = 100,
         learning_rate: float = 0.1,
-        base_learner: Union[str, List[str]] = "polynomial",
+        base_learner: Union[str, List[str]] = "linear",
         poly_degree: int = 2,
-        tree_max_depth: int = 2,
+        tree_max_depth: int = 1,
         n_bins: int = 256,
         spline_degree: int = 2,
         n_knots: int = 10,
-        loss: str = 'mse', # 'mse' or 'flooding'
+        loss: str = 'mse', # mse or flooding
         flood_level: float = 0.0,
         use_momentum: bool = False,
         use_top_k: bool = False,
@@ -26,12 +26,12 @@ class ComponentwiseBoostingModel:
         random_state: Optional[int] = None,
         eps_momentum: float = 1e-6,
         eps_linear: float = 1e-8,
-        target_df: float = 1.0 # New: Target Degrees of Freedom for penalization
+        target_df: float = 1.0 # target degrees of freedom for penalization
     ):
         self.n_estimators = n_estimators
         self.learning_rate = learning_rate
         
-        # --- 1. Modified Initialization for Competing Learners ---
+        # Modified initialization for competing learners
         if isinstance(base_learner, str):
             self.base_learners = [base_learner]
             self.legacy_mode = True
@@ -74,7 +74,7 @@ class ComponentwiseBoostingModel:
         self.feature_momentum = {} 
         self.feature_knots_ = {} # Stores knots for splines
         
-        # Cache for competing mode (Pre-computed matrices)
+        # Cache for competing mode (pre-computed matrices)
         self.competing_assets_ = {} 
         
         self.history = {
@@ -84,9 +84,10 @@ class ComponentwiseBoostingModel:
         }
 
     def _get_gradient(self, y_pred, y):
-        """Returns gradient of Loss w.r.t prediction (dL/dPred)"""
+        # returns gradient of loss with respect to prediction
         grad = (y_pred - y)
         if self.loss == 'flooding':
+            # invert gradient if loss falls below flood level to push it back up
             mse = torch.mean((y_pred - y)**2)
             if mse < self.flood_level:
                 grad *= -1.0 
@@ -101,12 +102,15 @@ class ComponentwiseBoostingModel:
             
             worst_loss = torch.max(losses_tensor).detach()
             mom_vec = torch.tensor([self.feature_momentum[i] for i in range(n_features)], device=losses_tensor.device)
+            # decay previous momentum
             mom_vec *= self.momentum_decay
             
+            # calculate gain relative to worst loss
             gains = worst_loss - losses_tensor
             max_gain = torch.max(gains)
             scores = gains / (max_gain + 1e-8)
-            mom_vec += scores 
+            # add normalized score to momentum vector
+            mom_vec += scores
             
             for i in range(n_features):
                 self.feature_momentum[i] = mom_vec[i].item()
@@ -119,6 +123,7 @@ class ComponentwiseBoostingModel:
         else:
             adjusted_losses = losses_tensor
 
+        # apply top-k logic
         if self.use_top_k:
             k = min(self.top_k, n_features)
             top_k_indices = torch.topk(adjusted_losses, k, largest=False).indices
@@ -130,52 +135,40 @@ class ComponentwiseBoostingModel:
             
         return selected_idx
 
-    # --- 2. Orthogonal Decomposition & Pre-computation ---
-
+    # Orthogonal Decomposition & Precomputation
     def _prepare_orthogonal_bases(self, X):
-        """
-        Pre-computes orthogonalized bases and solver matrices for Competing Learners.
-        """
+        # Precompute orthogonalized bases and solver matrices for competing learners
+
         n_samples, n_features = X.shape
         device = X.device
         
-        assets = {} # Store Solvers, Bases, Adjustments
+        assets = {}
 
-        # 1. Linear Basis Construction (Used for Projection)
-        # X_lin = [1, x] for each feature
-        # Shape: (F, N, 2)
+        # linear basis construction used for projection
         ones = torch.ones(n_samples, 1, device=device)
         X_lin_list = []
         for i in range(n_features):
             X_lin_list.append(torch.cat([ones, X[:, i:i+1]], dim=1))
         X_lin_all = torch.stack(X_lin_list, dim=0) # (F, N, 2)
         
-        # Pre-compute Projection Matrices: P = X_lin (X_lin^T X_lin)^-1 X_lin^T
-        # We need (X_lin^T X_lin)^-1 X_lin^T for the adjustment Gamma later
+        # Precompute projection matrices
         XTX = torch.bmm(X_lin_all.transpose(1, 2), X_lin_all)
-        # Regularize for stability
+        # Regularize matrix for numerical stability
         XTX += torch.eye(2, device=device).unsqueeze(0) * self.eps_linear
         
-        # Gamma_proj = (XTX)^-1 XT : (F, 2, N)
         Gamma_proj = torch.linalg.solve(XTX, X_lin_all.transpose(1, 2))
-        
-        # P_lin = X_lin @ Gamma_proj : (F, N, N) - careful with memory, do not store P directly if not needed.
-        # We compute P @ B on the fly or per feature.
 
         for learner_type in self.base_learners:
             if learner_type == 'tree' or learner_type == 'linear':
-                continue # No decomp/penalization needed for these
+                continue # no decomp/penalization needed for these
 
-            # --- Complex Learners (Poly / BSpline) ---
             B_list = []
             
             if learner_type == 'polynomial':
-                # Generate Poly Basis: [1, x, ..., x^d]
+                # Generate Poly Basis
                 exponents = torch.arange(1, self.poly_degree + 1, device=device).float()
                 for i in range(n_features):
-                    # (N, 1) -> (N, d)
                     poly_feats = X[:, i:i+1].pow(exponents)
-                    # Add Bias: (N, d+1)
                     bias = torch.ones(n_samples, 1, device=device)
                     B_list.append(torch.cat([bias, poly_feats], dim=1))
                 Omega = torch.eye(self.poly_degree + 1, device=device) # Ridge Penalty
@@ -185,17 +178,17 @@ class ComponentwiseBoostingModel:
                 X_np = X.detach().cpu().numpy()
                 # calculate fixed target dimensions for basis
                 target_K = self.n_knots + self.spline_degree + 1
-                # Construct Fixed Omega (Penalty) of size (target_K, target_K)
+                # Construct Omega
                 dummy_eye = np.eye(target_K)
                 D_fixed = np.diff(dummy_eye, n=2, axis=0)
                 Omega = torch.from_numpy(D_fixed.T @ D_fixed).float().to(device)
 
                 for i in range(n_features):
-                    # Determine Knots (Quantiles)
+                    # Determine knots with quantiles
                     percentiles = np.linspace(0, 100, self.n_knots + 2)
                     knots_all = np.unique(np.percentile(X_np[:, i], percentiles))
                     if len(knots_all) < 2:
-                        # Fallback for constant features
+                        # Fallback for constant features to prevent singular matrices
                         knots_all = np.array([X_np[:, i].min(), X_np[:, i].max()])
                         
                     # Construct full knot vector
@@ -206,42 +199,29 @@ class ComponentwiseBoostingModel:
                     # Design Matrix
                     dm_np = BSpline.design_matrix(X_np[:, i], t, self.spline_degree).toarray()
                 
-                # --- PADDING LOGIC ---
+                # Paddding logc
                     current_K = dm_np.shape[1]
                     if current_K < target_K:
-                        # Pad with zero columns on the right
+                        # Pad with zero columns on the right if matrix is smaller than target
                         pad_width = target_K - current_K
                         dm_np = np.pad(dm_np, ((0, 0), (0, pad_width)), mode='constant')
                     elif current_K > target_K:
-                        # Safety crop
+                        # safety crop if matrix exceeds target dimension
                         dm_np = dm_np[:, :target_K]
                     
                     B_list.append(torch.from_numpy(dm_np).float().to(device))
                 
-            # Stack Bases: Now guaranteed to be (F, N, K)
             B_all = torch.stack(B_list, dim=0)
             
-            # --- Orthogonal Transformation ---
-            # Gamma = (XTX)^-1 XT B  -> (F, 2, N) @ (F, N, K) -> (F, 2, K)
+            # Orthogonal Transformation
             Gamma = torch.bmm(Gamma_proj, B_all)
-            
-            # Projected = X_lin @ Gamma -> (F, N, 2) @ (F, 2, K) -> (F, N, K)
             Projected = torch.bmm(X_lin_all, Gamma)
-            
-            # B_tilde = B - Projected
             B_tilde = B_all - Projected
-            
-            # --- Penalization (Find Lambda) ---
-            # We solve for lambda for EACH feature individually or just use one?
-            # Ideally each feature has different scale, but we standardized inputs?
-            # We will solve one lambda per feature to be precise.
             
             Solver_matrices = []
             
-            # Helper to calc DF
+            # Helper to calculate degrees of freedom
             def calc_df(lam, B_mat, Om):
-                # trace( B (BtB + lam Om)^-1 Bt )
-                # = trace( (BtB + lam Om)^-1 (BtB) )
                 BtB = B_mat.T @ B_mat
                 n_k = BtB.shape[0]
                 M = BtB + lam * Om
@@ -256,44 +236,39 @@ class ComponentwiseBoostingModel:
                 b_curr = B_tilde[i] # (N, K)
                 
                 # Target DF constraint
-                # If basis is too small (e.g. orthogonalized poly deg 2 has rank 0 or 1), lambda=0
                 max_rank = min(b_curr.shape)
 
-                # Check for zero columns (padding) to avoid numerical noise issues
-                # Real rank is likely lower for padded features.
-                # Optimization might struggle if b_curr is all zeros (constant feature).
                 if torch.all(b_curr.abs() < 1e-9):
-                    # Zero matrix case
+                    # zero matrix case if basis is completely flat
                     Solver = torch.zeros(b_curr.shape[1], b_curr.shape[0], device=device)
                 else:
                     target = min(self.target_df, max_rank - 0.1)
                     
+                    # solve for optimal penalty lambda
                     res = minimize_scalar(
                         lambda l: (calc_df(10**l, b_curr, Omega) - target)**2,
                         bounds=(-5, 5), method='bounded'
                     )
                     best_lam = 10**res.x
                 
-                # Construct Solver Matrix: (BtB + lam Om)^-1 Bt
-                # Shape (K, N)
                     BtB = b_curr.T @ b_curr
                     M_inv = torch.linalg.inv(BtB + best_lam * Omega + torch.eye(BtB.shape[0], device=device)*self.eps_linear)
                     Solver = M_inv @ b_curr.T
                 
                 Solver_matrices.append(Solver)
                 
-            # Stack Solvers: (F, K, N)
+            # Stack solvers
             Solvers_stacked = torch.stack(Solver_matrices, dim=0)
             
             assets[learner_type] = {
-                'B_tilde': B_tilde,   # (F, N, K)
-                'Solver': Solvers_stacked, # (F, K, N)
-                'Gamma': Gamma        # (F, 2, K) - needed for prediction correction
+                'B_tilde': B_tilde,
+                'Solver': Solvers_stacked,
+                'Gamma': Gamma
             }
             
         return assets, X_lin_all
 
-    # --- Legacy Solvers (Vectorized) for single-mode ---
+    # Legacy Solvers for single learner mode
     
     def _solve_linear_vectorized(self, X, target):
         target = target.unsqueeze(1)
@@ -326,15 +301,13 @@ class ComponentwiseBoostingModel:
         return beta.squeeze(-1), losses
 
     def _solve_tree_vectorized(self, X_binned, target, bin_edges):
-        """
-        Solves Decision Stump (Depth=1) for all features simultaneously using
-        Histogram-based optimization (Lookup Table).
-        """
+        # solves decision stump for all features simultaneously using bins
         n_samples, n_features = X_binned.shape
         n_bins = self.n_bins
         device = X_binned.device
 
-        # 1. Efficient Histogram Aggregation (Vectorized)
+        # Histogram Aggregation (vectorized)
+        # create flat indices for fast histogram aggregation
         offsets = (torch.arange(n_features, device=device) * n_bins).view(1, -1)
         flat_indices = (X_binned + offsets).view(-1)  
         flat_target = target.view(-1, 1).expand(-1, n_features).reshape(-1)
@@ -348,35 +321,32 @@ class ComponentwiseBoostingModel:
         G = G_flat.view(n_features, n_bins)
         N = N_flat.view(n_features, n_bins)
         
-        # 2. Compute Cumulative Sums
+        # compute cumulative sums for left side
         G_L = torch.cumsum(G, dim=1)
         N_L = torch.cumsum(N, dim=1)
         
         G_T = G_L[:, -1:] 
         N_T = N_L[:, -1:]
-        
+        # compute right side using totals
         G_R = G_T - G_L
         N_R = N_T - N_L
         
-        # 3. Calculate Gain (Explained Sum of Squares)
         eps = 1e-6
-        # This term is effectively "Sum of Squares Explained" by the split
+        # Calculate gain
         gain = (G_L**2 / (N_L + eps)) + (G_R**2 / (N_R + eps))
         
-        # Mask invalid splits
+        # mask invalid splits where leaf has zero samples
         valid_mask = (N_L > 0) & (N_R > 0)
         valid_mask[:, -1] = False 
         gain[~valid_mask] = -1.0 
         
-        # 4. Find Best Split per Feature
-        # Maximize Gain <=> Minimize MSE
-        # SSE = Total_Sum_Squares - Explained_Sum_Squares
+        # maximize gain minimizes mse
         max_gain_per_feat = torch.max(gain, dim=1).values
         
         total_ss = torch.sum(target**2)
         
-        # Calculate Actual MSE for the best split of each feature
-        # This puts the tree loss on the same scale as Linear/Poly/Spline
+        # Calculate Actual MSE for best split of each feature
+        # gives tree loss same scale as Linear/Poly/Spline
         mse_per_feat = (total_ss - max_gain_per_feat) / n_samples
         
         return gain, mse_per_feat
@@ -396,7 +366,6 @@ class ComponentwiseBoostingModel:
         losses = ((preds - target_rep)**2).mean(dim=1)
         return beta.squeeze(-1), losses
 
-    # --- MAIN FIT ---
 
     def fit(self, X_train, y_train, X_val=None, y_val=None, X_test=None, y_test=None):
         X_train = torch.as_tensor(X_train, dtype=torch.float32)
@@ -408,6 +377,7 @@ class ComponentwiseBoostingModel:
             X_test = torch.as_tensor(X_test, dtype=torch.float32)
             y_test = torch.as_tensor(y_test, dtype=torch.float32)
 
+        # store intercept as initial prediction
         self.intercept_ = torch.mean(y_train).item()
         curr_pred_train = torch.full_like(y_train, self.intercept_)
         
@@ -419,8 +389,7 @@ class ComponentwiseBoostingModel:
 
         n_samples, n_features = X_train.shape
 
-        # --- PREPARATION ---
-        # 1. Bspline knots (needed for both modes)
+        # Compute B-spline knots if legacy mode is active
         if "bspline" in self.base_learners and self.legacy_mode:
             X_train_np = X_train.detach().cpu().numpy()
             for f_idx in range(n_features):
@@ -432,7 +401,7 @@ class ComponentwiseBoostingModel:
                     t = np.concatenate(([f_min]*self.spline_degree, [f_min], knots_all[1:-1], [f_max], [f_max]*self.spline_degree))
                     self.feature_knots_[f_idx] = t
 
-        # 2. Tree bins (needed for both modes)
+        # Compute tree bins if needed
         X_train_binned = None
         self.all_bin_edges = None
         if "tree" in self.base_learners:
@@ -448,11 +417,11 @@ class ComponentwiseBoostingModel:
                 X_binned_list.append(binned)
             X_train_binned = torch.stack(X_binned_list, dim=1)
 
-        # 3. Competing Mode Pre-computation
+        # Competing Mode Pre-computation
         if not self.legacy_mode:
             self.competing_assets_, _ = self._prepare_orthogonal_bases(X_train)
         else:
-            # Preparation for Legacy BSpline (Design Matrix)
+            # Preparation for legacy B-spline (design matrix)
             if self.base_learner == "bspline":
                 X_np = X_train.detach().cpu().numpy()
                 basis_matrices = []
@@ -460,19 +429,20 @@ class ComponentwiseBoostingModel:
                     knots = self.feature_knots_[f_idx]
                     x_col = np.clip(X_np[:, f_idx], knots[0], knots[-1])
                     dm = BSpline.design_matrix(x_col, knots, self.spline_degree)
-                    # Implementing padding for legacy here:
+                    # padding logic for legacy
                     target_K = self.n_knots + self.spline_degree + 1
                     dm_arr = dm.toarray()
+                    # pad matrix if smaller than target dimension
                     if dm_arr.shape[1] < target_K:
                         pad_w = target_K - dm_arr.shape[1]
                         dm_arr = np.pad(dm_arr, ((0,0), (0, pad_w)), mode='constant')
                     elif dm_arr.shape[1] > target_K:
                         dm_arr = dm_arr[:, :target_K]
-                         
+                        
                     basis_matrices.append(torch.from_numpy(dm_arr).float().to(X_train.device))
                 self.A_bspline_legacy = torch.stack(basis_matrices, dim=0)
 
-        # --- BOOSTING LOOP ---
+        # Boosting loop
         best_val_loss = float('inf')
         self.best_iteration_ = 0
 
@@ -483,9 +453,9 @@ class ComponentwiseBoostingModel:
             best_idx = -1
             best_params = None
             best_model_obj = None
-            best_learner_type = self.base_learner # Default for legacy
+            best_learner_type = self.base_learner
 
-            # --- A. LEGACY MODE (Original Logic) ---
+            # If using one base learner:
             if self.legacy_mode:
                 if self.base_learner == "linear":
                     betas, losses = self._solve_linear_vectorized(X_train, target)
@@ -507,7 +477,7 @@ class ComponentwiseBoostingModel:
                     best_idx = self._select_feature(losses)
                     best_bin_idx = torch.argmax(gains[best_idx]).item()
                     
-                    # Recompute leaf values
+                    # Recompute leaf values using optimal bin index
                     f_binned = X_train_binned[:, best_idx]
                     mask_left = f_binned <= best_bin_idx
                     val_left = target[mask_left].mean()
@@ -519,15 +489,15 @@ class ComponentwiseBoostingModel:
                         'right_val': val_right.item()
                     }
 
-            # --- B. COMPETING MODE (New Logic) ---
+            # Competing base learner mode
             else:
                 competitors_loss = []
-                competitors_meta = [] # (learner_type, params_tensor, extra_info)
+                competitors_meta = []
                 
-                # 1. Evaluate all base learners
+                # Evaluate all base learners to find best match
                 for l_type in self.base_learners:
                     if l_type == 'tree':
-                        # Tree is not pre-computed/vectorized per se in the same way (dynamic splits)
+                        # Tree is not pre-computed/vectorized
                         gains, losses = self._solve_tree_vectorized(X_train_binned, target, self.all_bin_edges)
                         competitors_loss.append(losses)
                         competitors_meta.append({'type': 'tree', 'gains': gains})
@@ -538,21 +508,15 @@ class ComponentwiseBoostingModel:
                         competitors_meta.append({'type': 'linear', 'betas': betas})
                         
                     elif l_type in self.competing_assets_:
-                        # Poly / Spline (Orthogonalized & Penalized)
+                        # Poly and B-spline: orthogonalized and penalized
                         assets = self.competing_assets_[l_type]
-                        Solver = assets['Solver'] # (F, K, N)
-                        B_tilde = assets['B_tilde'] # (F, N, K)
-                        
-                        # beta = Solver @ target (Batch MatMul)
-                        # Target (N,) -> (1, N, 1) broadcast not ideal.
-                        # We want (F, K, N) @ (F, N, 1) -> (F, K, 1)
-                        # Expand target to (F, N, 1)
+                        Solver = assets['Solver']
+                        B_tilde = assets['B_tilde']
+
                         target_exp = target.view(1, n_samples, 1).expand(n_features, n_samples, 1)
                         
-                        betas = torch.bmm(Solver, target_exp) # (F, K, 1)
-                        
-                        # Preds = B_tilde @ beta
-                        preds = torch.bmm(B_tilde, betas).squeeze(-1) # (F, N)
+                        betas = torch.bmm(Solver, target_exp)
+                        preds = torch.bmm(B_tilde, betas).squeeze(-1)
                         
                         # Loss
                         target_rep = target.unsqueeze(0)
@@ -561,18 +525,12 @@ class ComponentwiseBoostingModel:
                         competitors_loss.append(losses)
                         competitors_meta.append({'type': l_type, 'betas': betas.squeeze(-1)})
 
-                # 2. Global Selection (Best Feature AND Best Learner)
-                # Stack losses: (n_learners, n_features)
+                # Global selection
                 all_losses = torch.stack(competitors_loss, dim=0)
-                
-                # We need to run _select_feature logic. 
-                # Since _select_feature works on a 1D vector (features), we can:
-                # a) For each feature, pick the best learner -> min_loss_per_feat
-                # b) Run selection on min_loss_per_feat
-                
+
                 min_losses_per_feat, best_learner_indices = torch.min(all_losses, dim=0)
                 
-                # This selects the feature
+                # Select best feature and learner combination
                 best_idx = self._select_feature(min_losses_per_feat)
                 
                 # Retrieve which learner won for this feature
@@ -598,30 +556,22 @@ class ComponentwiseBoostingModel:
                     best_params = winner_meta['betas'][best_idx]
                     
                 else:
-                    # Poly / Spline
-                    # We need to store beta_raw and the Linear Correction (Gamma)
-                    # The solver gave us beta for the ORTHOGONAL basis (B_tilde)
-                    # Pred = B_tilde * beta
-                    # But B_tilde = B_raw - X_lin * Gamma
-                    # So Pred = B_raw * beta + X_lin * (-Gamma * beta)
-                    # We store: 'beta' (for B_raw) and 'beta_lin' (for X_lin)
+                    # Poly / B-spline
+                    beta_orth = winner_meta['betas'][best_idx]
                     
-                    beta_orth = winner_meta['betas'][best_idx] # Tensor (K,)
-                    
-                    # Get Gamma for this feature: (2, K)
                     Gamma_f = self.competing_assets_[best_learner_type]['Gamma'][best_idx]
                     
-                    # Calculate linear adjustment: - Gamma @ beta
+                    # Calculate linear adjustment for orthogonalized bases
                     beta_lin_adj = - torch.mv(Gamma_f, beta_orth)
                     
                     best_params = {
-                        'beta': beta_orth,      # The coefficients for the raw poly/spline basis
-                        'beta_lin': beta_lin_adj # The coefficients for the linear basis [1, x]
+                        'beta': beta_orth,
+                        'beta_lin': beta_lin_adj
                     }
                     if best_learner_type == 'bspline':
                         best_params['knots'] = self.feature_knots_[best_idx]
 
-            # --- Store & Update ---
+            # Store and Update
             self.estimators_.append({
                 'idx': best_idx,
                 'learner': best_learner_type,
@@ -631,16 +581,13 @@ class ComponentwiseBoostingModel:
             self.history['selected_features'].append(best_idx)
             self.history['selected_learners'].append(best_learner_type)
 
-            # --- Update Predictions ---
+            # Update Predictions
             def apply_update(X_in, learner_type, f_idx, params):
                 x_f = X_in[:, f_idx:f_idx+1]
                 N = x_f.shape[0]
                 pred = torch.zeros(N, device=X_in.device)
 
                 if learner_type == 'linear':
-                    # params is slope vector (legacy/linear)
-                    # Wait, legacy linear fits "y = beta * x" (no intercept in basis)
-                    # Check _solve_linear_vectorized: X * beta.
                     pred = (x_f * params).flatten()
 
                 elif learner_type == 'tree':
@@ -651,22 +598,15 @@ class ComponentwiseBoostingModel:
                     ).flatten()
 
                 elif learner_type == 'polynomial':
-                    # Handle Legacy vs Competing
-                    # Legacy: params is [b0, b1...]
-                    # Competing: params is dict {'beta':..., 'beta_lin':...}
-                    
+
                     if isinstance(params, dict) and 'beta_lin' in params:
-                        # Competing (Orthogonalized)
-                        # 1. Raw Poly Part
                         coeffs = params['beta']
-                        # Reconstruct Poly Basis (horner/power)
                         val_poly = torch.full((N,), coeffs[0].item(), device=X_in.device)
                         pow_x = x_f.flatten()
                         for p in range(1, len(coeffs)):
                             val_poly += coeffs[p] * pow_x
                             pow_x = pow_x * x_f.flatten()
                         
-                        # 2. Linear Correction Part (beta_lin is [intercept, slope])
                         lin_coeffs = params['beta_lin']
                         val_lin = lin_coeffs[0] + lin_coeffs[1] * x_f.flatten()
                         
@@ -708,7 +648,6 @@ class ComponentwiseBoostingModel:
                         x_np = x_f.flatten().detach().cpu().numpy()
                         x_np = np.clip(x_np, knots[0], knots[-1])
                         dm = BSpline.design_matrix(x_np, knots, self.spline_degree).toarray()
-                        # Pad pred if needed
                         if dm.shape[1] < coeffs.shape[0]:
                             dm = np.pad(dm, ((0,0), (0, coeffs.shape[0] - dm.shape[1])), mode='constant')
                         
@@ -764,7 +703,6 @@ class ComponentwiseBoostingModel:
                 ).flatten()
                 
             elif l_type == 'polynomial':
-                # Same Poly logic...
                 if isinstance(params, dict) and 'beta_lin' in params:
                     coeffs = params['beta']
                     val_poly = torch.full((N,), coeffs[0].item(), device=X.device)
@@ -792,7 +730,7 @@ class ComponentwiseBoostingModel:
                     x_np = np.clip(x_np, knots[0], knots[-1])
                     dm = BSpline.design_matrix(x_np, knots, self.spline_degree).toarray()
                     
-                    # PADDING FIX FOR PREDICT
+                    # Pad b-spline design matrix if needed
                     if dm.shape[1] < coeffs.shape[0]:
                         dm = np.pad(dm, ((0,0), (0, coeffs.shape[0] - dm.shape[1])), mode='constant')
                     
@@ -806,7 +744,7 @@ class ComponentwiseBoostingModel:
                     x_np = np.clip(x_np, knots[0], knots[-1])
                     dm = BSpline.design_matrix(x_np, knots, self.spline_degree).toarray()
                     
-                    # PADDING FIX FOR PREDICT
+                    # Pad b-spline design matrix if needed
                     if dm.shape[1] < coeffs.shape[0]:
                         dm = np.pad(dm, ((0,0), (0, coeffs.shape[0] - dm.shape[1])), mode='constant')
 

@@ -13,18 +13,9 @@ class RealData(Dataset):
 
         self.dataset_name = dataset_name.lower()
         
-        # Load Data Logic
         if self.dataset_name == 'diabetes':
             from sklearn.datasets import load_diabetes
-            # Load data (442 samples, 10 baseline variables)
-            # y_raw is a quantitative measure of disease progression one year after baseline
             X_raw, y_raw = load_diabetes(return_X_y=True)
-
-            # path = os.path.join(root_dir, 'diabetes', 'diabetes.csv')
-            # df = pd.read_csv(path)
-            # # Target is 'Outcome'
-            # X_raw = df.drop(columns=['Outcome']).values
-            # y_raw = df['Outcome'].values
             
         elif self.dataset_name == 'bodyfat':
             path = os.path.join(root_dir, 'body_fat', 'bodyfat.csv')
@@ -39,16 +30,6 @@ class RealData(Dataset):
             # Target is 'target_y'
             X_raw = df.drop(columns=['target_y']).values
             y_raw = df['target_y'].values
-
-        elif self.dataset_name == 'pcr':
-            # PCR Data: Space/Tab separated text files
-            x_path = os.path.join(root_dir, 'pcr', 'Xgene.txt')
-            y_path = os.path.join(root_dir, 'pcr', 'Y3.txt')
-            
-            # Use 'sep=r"\s+"' to handle variable whitespace
-            # added .T since the input matrix is stored transposed
-            X_raw = pd.read_csv(x_path, sep=r'\s+', header=None).T.values
-            y_raw = pd.read_csv(y_path, sep=r'\s+', header=None).values.flatten()
 
         else:
             raise ValueError(f"Unknown dataset: {dataset_name}")
