@@ -43,23 +43,25 @@ class ComponentwiseBoostingModel:
         
         # For legacy compatibility, expose the single learner string if in legacy mode
         self.base_learner = self.base_learners[0] if self.legacy_mode else "competing"
-
+        
+        # Setup base learner parameters
         self.poly_degree = poly_degree
         self.tree_max_depth = tree_max_depth
         self.n_bins = n_bins
-        
         self.spline_degree = spline_degree
         self.n_knots = n_knots
         
         self.loss = loss
         self.flood_level = flood_level
         
+        # Setup method hyperparameters
         self.use_momentum = use_momentum
         self.use_top_k = use_top_k
         self.top_k = top_k
         self.momentum_decay = momentum_decay
         self.momentum_strength = momentum_strength
         
+        # Save random state for reproducibility
         self.random_state = random_state
         if random_state is not None:
             torch.manual_seed(random_state)
@@ -94,9 +96,11 @@ class ComponentwiseBoostingModel:
         return grad
 
     def _select_feature(self, losses_tensor: torch.Tensor) -> int:
+        # Get total number of features
         n_features = len(losses_tensor)
         
         if self.use_momentum:
+            # initialize momentum if empty
             if len(self.feature_momentum) == 0:
                 for i in range(n_features): self.feature_momentum[i] = 0.0
             
@@ -112,21 +116,25 @@ class ComponentwiseBoostingModel:
             # add normalized score to momentum vector
             mom_vec += scores
             
+            # update stored momentum
             for i in range(n_features):
                 self.feature_momentum[i] = mom_vec[i].item()
                 
             loss_std = torch.std(losses_tensor).detach()
+            # compute scale factor for adjustment
             scale_factor = loss_std if loss_std > 1e-9 else 1.0
             adjustment = mom_vec * self.momentum_strength * scale_factor
 
+            # Adjust losses
             adjusted_losses = losses_tensor - adjustment
         else:
             adjusted_losses = losses_tensor
 
-        # apply top-k logic
+        # Apply top-k logic
         if self.use_top_k:
             k = min(self.top_k, n_features)
             top_k_indices = torch.topk(adjusted_losses, k, largest=False).indices
+            # calculate weights and select feature
             weights = torch.arange(k, 0, -1, device=losses_tensor.device, dtype=torch.float32)
             rank_idx = torch.multinomial(weights, 1).item()
             selected_idx = top_k_indices[rank_idx].item()
@@ -144,7 +152,7 @@ class ComponentwiseBoostingModel:
         
         assets = {}
 
-        # linear basis construction used for projection
+        # Linear basis construction used for projection
         ones = torch.ones(n_samples, 1, device=device)
         X_lin_list = []
         for i in range(n_features):
@@ -160,7 +168,8 @@ class ComponentwiseBoostingModel:
 
         for learner_type in self.base_learners:
             if learner_type == 'tree' or learner_type == 'linear':
-                continue # no decomp/penalization needed for these
+                # no decomp/penalization needed for these
+                continue
 
             B_list = []
             
@@ -171,7 +180,8 @@ class ComponentwiseBoostingModel:
                     poly_feats = X[:, i:i+1].pow(exponents)
                     bias = torch.ones(n_samples, 1, device=device)
                     B_list.append(torch.cat([bias, poly_feats], dim=1))
-                Omega = torch.eye(self.poly_degree + 1, device=device) # Ridge Penalty
+                # Ridge Penalty    
+                Omega = torch.eye(self.poly_degree + 1, device=device) 
 
             elif learner_type == 'bspline':
                 # Generate B-Spline Basis
@@ -250,7 +260,8 @@ class ComponentwiseBoostingModel:
                         bounds=(-5, 5), method='bounded'
                     )
                     best_lam = 10**res.x
-                
+
+                    # compute penalized least squares solver matrix
                     BtB = b_curr.T @ b_curr
                     M_inv = torch.linalg.inv(BtB + best_lam * Omega + torch.eye(BtB.shape[0], device=device)*self.eps_linear)
                     Solver = M_inv @ b_curr.T
@@ -271,10 +282,13 @@ class ComponentwiseBoostingModel:
     # Legacy Solvers for single learner mode
     
     def _solve_linear_vectorized(self, X, target):
+        # Solve linear equations using vectorized operations
         target = target.unsqueeze(1)
         numer = (X * target).sum(dim=0)
         denom = (X ** 2).sum(dim=0)
-        beta = numer / (denom + self.eps_linear) 
+        beta = numer / (denom + self.eps_linear)
+
+        # calculate predictions and losses
         preds = X * beta.unsqueeze(0) 
         losses = ((preds - target)**2).mean(dim=0)
         return beta, losses
@@ -282,10 +296,14 @@ class ComponentwiseBoostingModel:
     def _solve_poly_vectorized(self, X, target):
         n_samples, n_features = X.shape
         device = X.device
+
+        # initialize polynomial feature exponents and expand input dimensions
         exponents = torch.arange(1, self.poly_degree + 1, device=device).float()
         X_expanded = X.unsqueeze(-1)
         poly_features = X_expanded.pow(exponents)
         bias = torch.ones(n_samples, n_features, 1, device=device)
+
+        # construct design matrices with bias term for all features
         A = torch.cat([bias, poly_features], dim=2)
         A = A.permute(1, 0, 2)
         Y = target.view(1, n_samples, 1).expand(n_features, n_samples, 1)
@@ -294,9 +312,13 @@ class ComponentwiseBoostingModel:
         ATY = torch.bmm(A_T, Y)
         I = torch.eye(self.poly_degree + 1, device=device).unsqueeze(0).expand(n_features, -1, -1)
         ATA_reg = ATA + self.eps_linear * I
+
+        # solve regularized normal equations
         beta = torch.linalg.solve(ATA_reg, ATY)
         preds = torch.bmm(A, beta).squeeze(-1)
         target_rep = target.unsqueeze(0)
+
+        # compute batch predictions and resulting MSE for each feature
         losses = ((preds - target_rep)**2).mean(dim=1)
         return beta.squeeze(-1), losses
 
@@ -354,30 +376,39 @@ class ComponentwiseBoostingModel:
     def _solve_bspline_vectorized(self, A, target):
         n_features, n_samples, n_basis = A.shape
         device = A.device
+
+        # reshape target and transpose design matrices for batched operations
         Y = target.view(1, n_samples, 1).expand(n_features, n_samples, 1)
         A_T = A.transpose(1, 2)
         ATA = torch.bmm(A_T, A)
         ATY = torch.bmm(A_T, Y)
         I = torch.eye(n_basis, device=device).unsqueeze(0).expand(n_features, -1, -1)
         ATA_reg = ATA + self.eps_linear * I
+
+        # compute regularized system matrices and solve for spline coefficients
         beta = torch.linalg.solve(ATA_reg, ATY)
         preds = torch.bmm(A, beta).squeeze(-1)
         target_rep = target.unsqueeze(0)
+
+        # calculate preds and losses
         losses = ((preds - target_rep)**2).mean(dim=1)
         return beta.squeeze(-1), losses
 
 
     def fit(self, X_train, y_train, X_val=None, y_val=None, X_test=None, y_test=None):
+        # Convert inputs to tensors
         X_train = torch.as_tensor(X_train, dtype=torch.float32)
         y_train = torch.as_tensor(y_train, dtype=torch.float32)
         if X_val is not None:
+            # Convert validation inputs
             X_val = torch.as_tensor(X_val, dtype=torch.float32)
             y_val = torch.as_tensor(y_val, dtype=torch.float32)
         if X_test is not None:
+            # Convert test inputs
             X_test = torch.as_tensor(X_test, dtype=torch.float32)
             y_test = torch.as_tensor(y_test, dtype=torch.float32)
 
-        # store intercept as initial prediction
+        # Store intercept as initial prediction
         self.intercept_ = torch.mean(y_train).item()
         curr_pred_train = torch.full_like(y_train, self.intercept_)
         
@@ -391,13 +422,18 @@ class ComponentwiseBoostingModel:
 
         # Compute B-spline knots if legacy mode is active
         if "bspline" in self.base_learners and self.legacy_mode:
+            # Use numpy for quantile calculation
             X_train_np = X_train.detach().cpu().numpy()
             for f_idx in range(n_features):
                 if f_idx not in self.feature_knots_: 
                     percentiles = np.linspace(0, 100, self.n_knots + 2)
+
+                    # Determine knots
                     knots_all = np.unique(np.percentile(X_train_np[:, f_idx], percentiles))
                     if len(knots_all) < 2: knots_all = np.array([X_train_np[:, f_idx].min(), X_train_np[:, f_idx].max()])
                     f_min, f_max = X_train_np[:, f_idx].min(), X_train_np[:, f_idx].max()
+
+                    # Construct knot vector
                     t = np.concatenate(([f_min]*self.spline_degree, [f_min], knots_all[1:-1], [f_max], [f_max]*self.spline_degree))
                     self.feature_knots_[f_idx] = t
 
@@ -407,6 +443,8 @@ class ComponentwiseBoostingModel:
         if "tree" in self.base_learners:
             X_train_contig = X_train.contiguous()
             percentiles = torch.linspace(0, 1, self.n_bins + 1, device=X_train.device)
+
+            # Calculate bin edges using quantiles
             self.all_bin_edges = torch.quantile(X_train_contig, percentiles, dim=0).T
             self.all_bin_edges[:, -1] += 1e-4
             X_binned_list = []
@@ -415,6 +453,8 @@ class ComponentwiseBoostingModel:
                 binned = torch.bucketize(X_train_contig[:, f_idx], edges)
                 binned = torch.clamp(binned - 1, 0, self.n_bins - 1)
                 X_binned_list.append(binned)
+
+            # Map feature values to bins 
             X_train_binned = torch.stack(X_binned_list, dim=1)
 
         # Competing Mode Pre-computation
@@ -587,9 +627,11 @@ class ComponentwiseBoostingModel:
                 N = x_f.shape[0]
                 pred = torch.zeros(N, device=X_in.device)
 
+                # Linear learner
                 if learner_type == 'linear':
                     pred = (x_f * params).flatten()
 
+                # Decision stump learner
                 elif learner_type == 'tree':
                     pred = torch.where(
                         x_f <= params['threshold'],
@@ -597,8 +639,8 @@ class ComponentwiseBoostingModel:
                         torch.tensor(params['right_val'], device=x_f.device)
                     ).flatten()
 
+                # Polynomial learner
                 elif learner_type == 'polynomial':
-
                     if isinstance(params, dict) and 'beta_lin' in params:
                         coeffs = params['beta']
                         val_poly = torch.full((N,), coeffs[0].item(), device=X_in.device)
@@ -656,9 +698,12 @@ class ComponentwiseBoostingModel:
                 return pred
 
             learner_data = self.estimators_[-1]
+
+            # compute update
             update_train = apply_update(X_train, best_learner_type, best_idx, best_params) * self.learning_rate
             curr_pred_train += update_train
             
+            # update validation predictions
             if X_val is not None:
                 curr_pred_val += apply_update(X_val, best_learner_type, best_idx, best_params) * self.learning_rate
                 val_mse = torch.mean((curr_pred_val - y_val)**2).item()
@@ -667,10 +712,12 @@ class ComponentwiseBoostingModel:
                     best_val_loss = val_mse
                     self.best_iteration_ = i + 1
             
+            # update test predictions
             if X_test is not None:
                 curr_pred_test += apply_update(X_test, best_learner_type, best_idx, best_params) * self.learning_rate
                 self.history['test_loss'].append(torch.mean((curr_pred_test - y_test)**2).item())
 
+            # record train performance
             train_mse = torch.mean((curr_pred_train - y_train)**2).item()
             self.history['train_loss'].append(train_mse)
 
@@ -679,11 +726,16 @@ class ComponentwiseBoostingModel:
 
     def predict(self, X, use_best_model=False):
         X = torch.as_tensor(X, dtype=torch.float32)
+
+        # initialize pred with intercept
         pred = torch.full((X.shape[0],), self.intercept_)
         
         limit = self.best_iteration_ if use_best_model and self.best_iteration_ > 0 else len(self.estimators_)
+
+        # determine model depth
         estimators_to_use = self.estimators_[:limit]
-            
+        
+        # iterate through estimators to accumulate updates from features
         for est in estimators_to_use:
             f_idx = est['idx']
             l_type = est['learner']
@@ -693,15 +745,19 @@ class ComponentwiseBoostingModel:
             
             update = None
             
+            # update for linear learner
             if l_type == 'linear':
                 update = (x_f * params).flatten()
+
+            # update for tree learner
             elif l_type == 'tree':
                 update = torch.where(
                     x_f <= params['threshold'],
                     torch.tensor(params['left_val'], device=X.device),
                     torch.tensor(params['right_val'], device=X.device)
                 ).flatten()
-                
+            
+            # update for polynomial learner
             elif l_type == 'polynomial':
                 if isinstance(params, dict) and 'beta_lin' in params:
                     coeffs = params['beta']
@@ -721,6 +777,7 @@ class ComponentwiseBoostingModel:
                         update += coeffs[p] * pow_x
                         pow_x = pow_x * x_f.flatten()
             
+            # update for B-spline learner
             elif l_type == 'bspline':
                 if isinstance(params, dict) and 'beta_lin' in params:
                     coeffs = params['beta'].detach().cpu().numpy()
@@ -750,6 +807,7 @@ class ComponentwiseBoostingModel:
 
                     update = torch.from_numpy(dm @ coeffs).float().to(X.device)
             
+            # Accumulate updates to prediction
             pred += update * self.learning_rate
             
         return pred
